@@ -1,6 +1,6 @@
 from __future__ import annotations
 from uuid import UUID
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, List
 from datetime import datetime
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID 
 from sqlalchemy import Integer, String, Boolean, CheckConstraint, UniqueConstraint, Index, DateTime, ForeignKey
@@ -12,6 +12,7 @@ from app.models.enum import UserRole
 # Importing models for python level mapping
 if TYPE_CHECKING:
     from app.models.tenant import Tenant 
+    from app.models.refresh_token import RefreshToken
 
 
 class User(BaseModel):
@@ -46,7 +47,7 @@ class User(BaseModel):
 
         # Multi-tenancy - Every single query will start with WHERE tenant_id = " "
         # Every login attempt from user will ask for tenant_id and email. 
-        UniqueConstraint("tenant_id", "email", name="uq_user_tenant_email"),
+        UniqueConstraint("email", name="uq_user_email"),
 
         # In almost every query you will include WHERE is_active = True 
         Index("idx_user_tenant_active", "tenant_id", "is_active"),
@@ -126,5 +127,11 @@ class User(BaseModel):
     tenant: Mapped["Tenant"] = relationship(
         "Tenant", 
         back_populates="users", 
+        lazy="noload"
+    )
+
+    refresh_tokens : Mapped[List["RefreshToken"]] = relationship(
+        "RefreshToken", 
+        back_populates="user",
         lazy="noload"
     )
