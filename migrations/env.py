@@ -16,7 +16,7 @@ import app.models   # registers models with Base.metadata
 config = context.config
 
 # Set DB URL dynamically — overrides empty sqlalchemy.url in alembic.ini
-alembic_url = settings.database_url.replace("%", "%%")  # Escape % for config parser    
+alembic_url = settings.DATABASE_URL.replace("%", "%%")  # Escape % for config parser    
 config.set_main_option("sqlalchemy.url", alembic_url)
 
 # Interpret the config file for Python logging.
