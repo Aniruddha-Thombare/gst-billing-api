@@ -81,6 +81,7 @@ class InvoiceType(str, Enum):
     PURCHASE = "purchase"
     CREDIT_NOTE = "credit_note"
     DEBIT_NOTE = "debit_note"
+    PAYMENT = "payment"
 
 # Belongs to Invoice Table 
 class SupplyType(str, Enum):
@@ -125,6 +126,7 @@ class InvoiceStatus(str, Enum):
     OVERDUE = "overdue"
     CANCELLED = "cancelled"
     VOID = "void"
+    
 
 # Belongs to Invoice Table 
 class PaymentStatus(str, Enum):

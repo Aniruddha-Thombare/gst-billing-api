@@ -1,12 +1,23 @@
+import asyncio
+
+from datetime import date
 from uuid import UUID
+
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
 
-from app.schemas.auth import TenantRegisterRequest, LoginRequest, RefreshRequest,TokenResponse, RegistrationResponse, AccessTokenResponse
+from app.schemas.auth import (
+    TenantRegisterRequest, LoginRequest, RefreshRequest, TokenResponse,
+    RegistrationResponse, AccessTokenResponse)
 from app.core import security
+from app.models.enum import UserRole
+from app.domain.business_rules import get_financial_year
 
 from app.core.security import TokenDecodeError
-from app.repositories import tenant_repository, user_repository, refresh_token_repository
+from app.repositories import (
+    tenant_repository, user_repository,
+    refresh_token_repository, tenant_compliance_repository
+)
 from app.core.exceptions import (
     AuthenticationError,
     DuplicateGSTINError,
@@ -17,6 +28,10 @@ from app.core.exceptions import (
     TokenExpiredError
 )
 
+# A real bcrypt hash, built once at startup. Used when the email does not
+# exist, so unknown-email and wrong-password logins take the same time.
+_DUMMY_PASSWORD_HASH: str = security.hash_password("timing-defense-dummy-password")
+
 
 async def register(
     db: AsyncSession,
@@ -24,38 +39,27 @@ async def register(
     request: TenantRegisterRequest,
 ) -> RegistrationResponse:
     """
-    Registers a new business on the platform.
-    
-    Operations (all atomic — if any fail, everything rolls back):
-      1. Check GSTIN not already registered
-      2. Create Tenant row
-      3. Check email not already in use (within the new tenant)
-      4. Hash the password
-      5. Create User row with role="owner"
-      6. Commit transaction
-      7. Issue access + refresh tokens
-      8. Store refresh token hash in DB
-      9. Return both tokens
+    Registers a new business: tenant + owner user + initial compliance
+    profile, all in ONE transaction (any failure rolls back everything).
+    Returns no tokens; the user logs in separately.
     """
-    # Step 1: GSTIN uniqueness check
-    # We check before inserting to give a clean error message.
-    # The DB unique constraint is still there as the final safeguard.
-    existing_tenant = await tenant_repository.get_by_gstin(db, gstin=request.gstin)
-    if existing_tenant:
-        raise DuplicateGSTINError(request.gstin)
+    # bcrypt is CPU-heavy (~250ms). Run it in a thread so the event loop
+    # keeps serving other requests, and do it BEFORE the transaction opens
+    # so no DB connection is held while hashing.
+    hashed_password = await asyncio.to_thread(security.hash_password, request.password)
 
-    # Steps 2-5 are wrapped in a transaction.
-    # async with db.begin() → starts a transaction.
-    # If ANY line inside raises an exception → automatic ROLLBACK.
-    # If the block exits without exception → automatic COMMIT.
-    try: 
+    try:
         async with db.begin():
-            # Step 2: Create tenant
+            # GSTIN pre-check gives a clean error; the DB constraint is the final safeguard.
+            existing_tenant = await tenant_repository.get_by_gstin(db, gstin=request.gstin)
+            if existing_tenant:
+                raise DuplicateGSTINError(request.gstin)
+
             tenant = await tenant_repository.create(
                 db,
                 business_name=request.business_name,
                 legal_name=request.legal_name,
-                gstin=request.gstin.upper(),    # normalize: always store GSTIN uppercase
+                gstin=request.gstin.upper(),
                 pan=request.gstin[2:12],
                 address_line1=request.address_line,
                 city=request.city,
@@ -64,33 +68,49 @@ async def register(
                 email=request.email,
                 registration_type=request.registration_type,
             )
-            # After flush() inside create(), tenant.id is now available
-            # without having committed to the DB yet.
-            # Step 3: Email uniqueness check within this new tenant
-            existing_user = await user_repository.get_by_email(db, email=request.email)
 
-            # We check if the email exists AND belongs to the exact same tenant
+            existing_user = await user_repository.get_by_email(db, email=request.email)
             if existing_user:
                 raise DuplicateEmailError(request.email)
-            
-            #- Hash the password BEFORE storing
-            # Never store plain text passwords. Ever.
-            hashed_password = security.hash_password(request.password)
 
-            # Step 5: Create the owner user
             user = await user_repository.create(
                 db,
                 tenant_id=tenant.id,
                 email=request.email.lower(),
                 hashed_password=hashed_password,
                 full_name=request.full_name.strip(),
-                role="owner",     # first user of a tenant is always the owner
+                role=UserRole.OWNER,
             )
-    except IntegrityError:
-        # Race condition guard: two concurrent registrations with the same
-        # GSTIN both pass the pre-check then race to insert. The DB unique
-        # constraint on gstin catches the second writer.
-        raise DuplicateGSTINError(request.gstin)
+
+            # Financial year is derived server-side from today's date, never
+            # client-supplied. Example: today = 2025-01-15 -> FY "2024-25",
+            # effective_from = 2024-04-01.
+            today = date.today()
+            financial_year = get_financial_year(today)
+            fy_start_year = int(financial_year.split("-")[0])
+            effective_from = date(fy_start_year, 4, 1)
+
+            await tenant_compliance_repository.create(
+                db,
+                tenant_id=tenant.id,
+                financial_year=financial_year,
+                annual_turnover=request.annual_turnover,
+                composition_turnover=request.composition_turnover,
+                is_msme=request.is_msme,
+                effective_from=effective_from,
+                effective_to=None
+            )
+
+    except IntegrityError as exc:
+        constraint = getattr(getattr(exc.orig, "diag", None), "constraint_name", None)
+        if constraint == "uq_tenant_gstin":
+            raise DuplicateGSTINError(request.gstin) from exc
+        if constraint in ("uq_user_email", "uq_tenant_email"):
+            raise DuplicateEmailError(request.email) from exc
+        if constraint == "uq_tenant_pan":
+            # One Tenant per PAN in this MVP (see earlier design note).
+            raise DuplicateGSTINError(request.gstin) from exc
+        raise
 
     return RegistrationResponse(
         tenant_id=tenant.id,
@@ -105,41 +125,29 @@ async def login(
     device_info: str | None = None,
 ) -> TokenResponse:
     """
-    Authenticates a user and issues a new session.
-    
-    Operations:
-      1. Find user by email
-      2. Verify password
+    Authenticates a user and issues a new session:
+      1. Find user by email (own short transaction)
+      2. Verify password (in a thread, no DB connection held)
       3. Check user is active
       4. Issue tokens
-      5. Store refresh token hash in DB
-      6. Update last_login_at timestamp
+      5. Store refresh-token hash + update last login (one transaction)
     """
-    # Step 1: Find user by email
-    user = await user_repository.get_by_email(db, email=request.email)
+    async with db.begin():
+        user = await user_repository.get_by_email(db, email=request.email)
 
-    # Step 2: Verify password
-    # IMPORTANT: we check user is None AND wrong password with the SAME error.
-    # "Invalid email or password" — never tell the attacker which part failed.
-    # If user is None, we still call verify_password with a dummy hash.
-    # Why? To prevent timing attacks:
-    #   Without dummy hash: "no user" returns in 0ms, "wrong password" in 250ms.
-    #   An attacker can probe emails by measuring response time.
-    #   With dummy hash: both cases take ~250ms.
-    dummy_hash = "$2b$12$000000000000000000000000000000000000000000000000000000"
-    password_is_correct = security.verify_password(
-        request.password,
-        user.hashed_password if user else dummy_hash,
+    # Same error for "no such user" and "wrong password", and the same
+    # amount of work for both (dummy hash), so response time leaks nothing.
+    password_hash = user.hashed_password if user else _DUMMY_PASSWORD_HASH
+    password_is_correct = await asyncio.to_thread(
+        security.verify_password, request.password, password_hash,
     )
 
     if not user or not password_is_correct:
         raise AuthenticationError()
 
-    # Step 3: Check account is active
     if not user.is_active:
         raise UserInactiveError()
 
-    # Steps 4-5: Tokens
     access_token = security.create_access_token(
         user_id=user.id,
         tenant_id=user.tenant_id,
@@ -159,9 +167,8 @@ async def login(
             raw_token=refresh_token,
             device_info=device_info,
         )
-        # Step 6: Update last login timestamp
         await user_repository.update_last_login(
-            db, 
+            db,
             user_id=user.id,
             tenant_id=user.tenant_id
         )
@@ -178,44 +185,31 @@ async def refresh(
     request: RefreshRequest,
 ) -> AccessTokenResponse:
     """
-    Issues a new access token using a valid refresh token.
-    
-    Operations:
-      1. Decode and validate the refresh token JWT
-      2. Look up the token hash in DB
-      3. Verify it has not been revoked or expired
-      4. Issue a new access token
+    Issues a new access token from a valid refresh token. A valid JWT alone
+    is not enough: the token's hash must exist in the DB and not be revoked.
     """
-    # Step 1: Decode JWT — verifies signature and expiry
     try:
         payload = security.decode_token(
             request.refresh_token,
-            expected_type="refresh",    # CRITICAL: reject access tokens here
+            expected_type="refresh",    # rejects access tokens here
         )
     except (TokenDecodeError, TokenExpiredError):
         raise TokenInvalidError()
 
-    # Step 2: Look up in DB — even a valid JWT must be in the DB
-    # This is what enables revocation. Without DB check, a stolen
-    # refresh token that was "logged out" would still work.
-    stored_token = await refresh_token_repository.get_by_raw_token(
-        db, 
-        raw_token=request.refresh_token,
-        tenant_id=payload.tenant_id
-    )
+    async with db.begin():
+        stored_token = await refresh_token_repository.get_by_raw_token(
+            db,
+            raw_token=request.refresh_token,
+            tenant_id=payload.tenant_id
+        )
 
     if not stored_token:
-        # Token not in DB — was it already used/deleted? Suspicious.
         raise TokenInvalidError()
 
-    # Step 3: Check validity (not revoked, not expired)
     if not stored_token.is_valid:
         raise RefreshTokenRevokedError()
 
-    # Step 4: Issue new access token
-    # We do NOT issue a new refresh token here.
-    # Refresh token rotation (new refresh token on each use) can be added
-    # later. For now, keep the same refresh token for its 7-day lifespan.
+    # No refresh-token rotation yet; the same refresh token lives its 7 days.
     access_token = security.create_access_token(
         user_id=payload.sub,
         tenant_id=payload.tenant_id,
@@ -230,19 +224,13 @@ async def logout(
     *,
     refresh_token: str,
     tenant_id: UUID,
+    user_id: UUID,
 ) -> None:
     """
-    Revokes a refresh token, ending the session.
-    
-    The access token cannot be revoked (stateless JWT).
-    It will expire on its own in 15 minutes.
-    After logout, the client must discard the access token and
-    stop sending it. It will fail on the next token check anyway
-    because the DB check happens on refresh, not on every request.
-    
-    If you need immediate access token revocation, store the JTI
-    in Redis with a 15-minute TTL. Check Redis in dependencies.py.
-    That is a future enhancement — not needed for day 1.
+    Revokes a refresh token, ending the session. The access token cannot be
+    revoked (stateless JWT) and simply expires in 15 minutes.
     """
     async with db.begin():
-        await refresh_token_repository.revoke(db, raw_token=refresh_token, tenant_id=tenant_id)
+        await refresh_token_repository.revoke(
+            db, raw_token=refresh_token, tenant_id=tenant_id, user_id=user_id,
+        )

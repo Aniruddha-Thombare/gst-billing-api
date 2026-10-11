@@ -1,5 +1,6 @@
 import re
-from datetime import datetime
+from datetime import datetime, date 
+from decimal import Decimal 
 from uuid import UUID
 from app.models.enum import UserRole
 
@@ -21,10 +22,8 @@ from pydantic import BaseModel, EmailStr, Field, field_validator
 
 _PASSWORD_PATTERN = re.compile(
     r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,72}$"
-)
+) 
 
-
-# REGISTRATION 
 
 class TenantRegisterRequest(BaseModel):
     """
@@ -124,6 +123,32 @@ class TenantRegisterRequest(BaseModel):
         strip_whitespace=True,
     )
 
+    annual_turnover: Decimal = Field(
+        default=Decimal("0"),
+        ge=Decimal("0"),
+        description=(
+            "Aggregate annual turnover from the preceding financial year in rupees. "
+            "Used for HSN digit requirement and e-invoice applicability checks. "
+            "Leave at 0 if this is a new business with no prior FY turnover."
+        ),
+        examples=["75000000.00"]
+    )
+
+    is_msme: bool = Field(
+        default=False,
+        description=(
+            "True if the business is registered as MSME "
+            "(Micro, Small or Medium Enterprise). "
+            "Affects credit period rules and MSME statutory reporting."
+        )
+    )
+
+    composition_turnover: Decimal = Field(
+        default=Decimal("0"),
+        ge=Decimal("0"),
+        description="Only for composition scheme businesses. Zero for regular taxpayers.",
+    )
+
     @field_validator('business_name')
     @classmethod
     def clean_and_validate_business_name(cls, v):
@@ -135,7 +160,6 @@ class TenantRegisterRequest(BaseModel):
         # This takes "Acme        Ltd" and turns it into "Acme Ltd"
         return re.sub(r'\s+', ' ', v)
     
-
     @field_validator('email')
     @classmethod
     def lowercase_email(cls, v: str) -> str:

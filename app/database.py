@@ -27,6 +27,14 @@ engine = create_async_engine(
 
     # Recycles connections every 30 minutes to prevent cloud firewalls from dropping them
     pool_recycle = 1800,
+
+    connect_args={
+        "server_settings": {
+            "lock_timeout": "5000",                         # wait max 5s for a row lock
+            "statement_timeout": "30000",                   # kill any query over 30s
+            "idle_in_transaction_session_timeout": "60000", # kill abandoned open transactions
+        }
+    },
 )
 
 # session factory 

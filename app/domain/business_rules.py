@@ -321,9 +321,9 @@ def validate_invoice_number_format(invoice_number:str) -> bool:
 
     EXAMPLES OF VALID FORMATS:
       "INV/23-24/00001"   → Series/FY/Sequence (recommended)
-      "GST-2024-001"        → Alternative with hyphens
-      "A001"                → Minimal valid format
-      "INV001"              → Simple numeric series
+      "GST-2024-001" → Alternative with hyphens
+      "A001" → Minimal valid format
+      "INV001" → Simple numeric series
     """
     if not isinstance(invoice_number, str) or not invoice_number.strip():
         return False

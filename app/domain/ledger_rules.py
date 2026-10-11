@@ -23,6 +23,20 @@ MUTABLE_STATES: frozenset[str] = frozenset({"draft"})
 # then only the payments will be accepted. 
 PAYABLE_STATES: frozenset[str] = frozenset({"sent", "partial"})
 
+# Only invoices in "sent" status are voidable — a draft was never issued,
+# there's nothing to void (it can simply stay a draft or be discarded);
+# "partial"/"paid" mean money has already been received, which void
+# cannot represent correctly (see validate_invoice_is_voidable below,
+# which also independently checks paid_amount == 0 as a second guard —
+# same defense-in-depth pattern as PAYABLE_STATES + the outstanding check).
+VOIDABLE_STATES: frozenset[str] = frozenset({"sent"})
+
+# Only sales and purchase invoices can be corrected by a credit note.
+# Crediting a credit note, a debit note or a payment receipt has no
+# meaning under the CGST Act, so the original's type is its own guard,
+# independent of its status.
+CREDITABLE_ORIGINAL_TYPES: frozenset[str] = frozenset({"sales", "purchase"})
+
 InvoiceStatus = Literal[
     "draft",
     "sent",
@@ -256,6 +270,40 @@ def validate_credit_note_amount(
             f"(original ₹{original_invoice_total} − "
             f"already credited ₹{already_credited})."
         )
+
+def validate_invoice_accepts_credit_note(
+    original_invoice_type: str,
+    original_invoice_status: InvoiceStatus,
+    original_invoice_number: str,
+) -> None:
+    """
+    Raises ValueError if a credit note cannot be issued against this invoice.
+
+    Two independent guards, both must pass:
+    1. The original must be a sales or purchase invoice, not itself a
+       credit note or debit note.
+    2. The original must be submitted with an outstanding balance
+       ('sent' or 'partial' = PAYABLE_STATES). A credit note is absorbed
+       through allocate_payment, which needs outstanding > 0. A draft was
+       never issued, a void invoice must stay void, and a fully paid
+       invoice has nothing left to absorb the credit.
+
+    Called twice: at credit note creation (fail early, clear error) and
+    again inside _apply_credit_note_to_original under the invoice lock
+    (the original's state may have changed between creation and submission).
+    """
+    if original_invoice_type not in CREDITABLE_ORIGINAL_TYPES:
+        raise ValueError(
+            f"Invoice '{original_invoice_number}' is a '{original_invoice_type}' and "
+            f"cannot be credited. Credit notes can only be issued against sales "
+            f"or purchase invoices."
+        )
+    if original_invoice_status not in PAYABLE_STATES:
+        raise ValueError(
+            f"Invoice '{original_invoice_number}' is in status '{original_invoice_status}' "
+            f"and cannot receive a credit note. Only submitted invoices with an "
+            f"outstanding balance ('sent' or 'partial') can be credited."
+        )
     
 def calculate_post_credit_note_outstanding(
     original_invoice_total: Decimal,
@@ -276,3 +324,64 @@ def calculate_post_credit_note_outstanding(
     if amount_paid > adjusted_invoice_total:
         raise ValueError("amount paid should not be greater than actual pending invoice amount")
     return _round(max(ZERO, adjusted_invoice_total - amount_paid))
+
+def derive_status_after_payment_cancellation(
+    remaining_paid: Decimal,
+    invoice_total: Decimal,
+) -> InvoiceStatus:
+    """
+    Determines the invoice's new status after a payment is cancelled and
+    paid_amount is recomputed.
+
+    remaining_paid is the sum of active payments PLUS submitted credit
+    notes, because a credit note reduces the balance through paid_amount
+    exactly as a payment does. That makes all three outcomes reachable:
+    - remaining_paid == 0               -> "sent"    (nothing absorbed)
+    - 0 < remaining_paid < invoice_total -> "partial"
+    - remaining_paid >= invoice_total    -> "paid"    (credits alone can
+      cover the full invoice, so cancelling a payment does not always
+      reopen the balance)
+
+    Pure function, no DB access.
+    """
+    if remaining_paid >= invoice_total:
+        return "paid"
+    return "sent" if remaining_paid == ZERO else "partial"
+
+
+def validate_invoice_is_voidable(
+    invoice_status: InvoiceStatus,
+    paid_amount: Decimal,
+    invoice_number: str,
+) -> None:
+    """
+    Raises ValueError if the invoice cannot be voided.
+
+    Two independent guards, both must pass:
+    1. invoice_status must be "sent" — draft was never issued (nothing to
+       void); partial/paid/void/cancelled/overdue are all terminal or
+       payment-bearing states void cannot represent.
+    2. paid_amount must be exactly zero — this is the real invariant.
+       VOIDABLE_STATES alone would already exclude "partial"/"paid" by
+       name, but checking paid_amount directly guards against the status
+       and the amount ever drifting apart (the same "don't trust a label,
+       check the number" principle applied throughout this file — e.g.
+       calculate_outstanding_balance's own defensive max(ZERO, ...) rather
+       than trusting callers validated first).
+
+    Voiding an invoice with real payments recorded against it would leave
+    those payments orphaned with nothing valid to point to — the correct
+    instrument for a submitted, paid invoice needing correction is a
+    Credit Note, not a void.
+    """
+    if invoice_status not in VOIDABLE_STATES:
+        raise ValueError(
+            f"Invoice '{invoice_number}' is in status '{invoice_status}' "
+            f"and cannot be voided. Only 'sent' invoices with no payments "
+            f"recorded can be voided."
+        )
+    if paid_amount != ZERO:
+        raise ValueError(
+            f"Invoice '{invoice_number}' has ₹{paid_amount} in recorded "
+            f"payments and cannot be voided. Issue a Credit Note instead."
+        )

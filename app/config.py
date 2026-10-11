@@ -35,7 +35,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",     # Read from .env file in project root
         env_file_encoding="utf-8",  # File encoding 
-        case_sensitive=False   # DATABASE_URL and database_url both are accepted
+        case_sensitive=False,   # DATABASE_URL and database_url both are accepted
+        extra="ignore"  #Skips Unknown variables 
     )
 
 # SINGLETON INSTANCE: Instantiated ONCE at module load time.

@@ -13,6 +13,7 @@ from app.models.invoice_item import InvoiceItem
 from app.models.payment import Payment
 from app.models.audit_log import AuditLog
 from app.models.refresh_token import RefreshToken
+from app.models.tenant_compliance import TenantCompliance
 
 
 __all__ = [
@@ -26,6 +27,7 @@ __all__ = [
     "Payment",
     "AuditLog",
     "RefreshToken",
+    "TenantCompliance"
 
     # enums: 
     "RegistrationType",

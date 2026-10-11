@@ -209,13 +209,12 @@ def calculate_taxable_amount(
     if unit_price < ZERO:
         raise ValueError("Unit price cannot be negative.")
     
-    gross_value = unit_price * quantity
+    gross_value = _round(unit_price * quantity)
 
     if discount_amount > gross_value:
         raise ValueError("Discount cannot exceed gross value.")
     
-    taxable_value = gross_value - discount_amount
-    return _round(taxable_value)
+    return _round(gross_value - discount_amount)
 
 
 def calculate_line_item_tax(
@@ -237,7 +236,7 @@ def calculate_line_item_tax(
         raise ValueError("GST rate is not a valid rate")
     
     if taxable_value < ZERO:
-        raise ValueError("Taxable value cannot be zero")
+        raise ValueError("Taxable value cannot be negative")
 
     if supply_type == "intrastate":
         cgst_rate = gst_rate / 2 
@@ -255,7 +254,7 @@ def calculate_line_item_tax(
         sgst_amount = ZERO
 
     if cess_rate < ZERO:
-        raise ValueError("cess rate should be alwaus positive")
+        raise ValueError("cess rate cannot be negative")
     cess_amount = _round(taxable_value * cess_rate /ONE_HUNDRED)
 
     total_tax_amount = cgst_amount + sgst_amount + igst_amount + cess_amount
@@ -263,7 +262,7 @@ def calculate_line_item_tax(
     line_total = _round(taxable_value + total_tax_amount)
 
     return TaxBreakdown(
-        taxable_value = taxable_value,
+        taxable_amount = taxable_value,
         gst_rate = gst_rate,
         supply_type = supply_type,
         cgst_rate = cgst_rate,
@@ -286,7 +285,7 @@ def aggregate_invoice_taxes(line_items: list[TaxBreakdown]) -> InvoiceTaxSummary
     Called once per invoice, after all line items are calculated.
     The result is persisted at the invoice header level.
     """
-    total_taxable = _round(sum((li.taxable_value for li in line_items), ZERO))
+    total_taxable = _round(sum((li.taxable_amount for li in line_items), ZERO))
     total_cgst = _round(sum((li.cgst_amount for li in line_items), ZERO))
     total_sgst = _round(sum((li.sgst_amount for li in line_items), ZERO))
     total_igst = _round(sum((li.igst_amount for li in line_items), ZERO))

@@ -54,7 +54,6 @@ async def create(
         pincode:str,
         email:str,
         registration_type:RegistrationType,
-
     ) -> Tenant:
     """
     Insert a new Tenant row.

@@ -83,6 +83,9 @@ class Party(BaseModel):
         # only return the ones you are currently doing business with
         Index("idx_party_tenant_active", "tenant_id", "is_active"),
 
+        # Keyset list: ORDER BY name, id within a tenant
+        Index("idx_party_tenant_name_id", "tenant_id", "name", "id"),
+
         # When the user clicks on "View Customers"
         # the API runs WHERE tenant_id = ".." AND party_type = "customer"
         Index("idx_party_tenant_type", "tenant_id", "party_type"),
@@ -136,6 +139,19 @@ class Party(BaseModel):
     is_active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True,
         server_default=text("true")
+    )
+
+    # Audit: who created / last changed this party
+    created_by: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True
+    )
+
+    updated_by: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True
     )
  
     # Relationships - Inter relations between the tables at python level 
