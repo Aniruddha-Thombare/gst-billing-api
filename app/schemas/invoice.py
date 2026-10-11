@@ -23,7 +23,7 @@ class LineItemCreate(BaseModel):
 
     hsn_sac_code: str | None = Field(
         default= None,
-        pattern=r"^[0-9]{2,8}$",
+        pattern=r"^[0-9]{4,8}$",
         description="HSN (goods, numeric, 2 - 8 digits) or SAC (services, 99XXXX, 6 digits)"
     )
 
