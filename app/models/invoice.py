@@ -10,7 +10,7 @@ from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.sql import text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.models.base import BaseModel
-from app.models.enum import InvoiceStatus, InvoiceType, SupplyType, PaymentStatus
+from app.models.enum import InvoiceStatus, InvoiceType, SupplyType
 from app.models.constants import FINANCIAL_YEAR_REGEX
 
 # Importing models for python level mapping
@@ -54,10 +54,6 @@ class Invoice(BaseModel):
         CheckConstraint(
             f"invoice_status IN ({', '.join(repr(e.value) for e in InvoiceStatus)})",
             name="check_invoice_status"
-        ),
-        CheckConstraint(
-            f"payment_status IN ({', '.join(repr(e.value) for e in PaymentStatus)})",
-            name="check_invoice_payment_status"
         ),
         CheckConstraint(
             f"invoice_type IN ({', '.join(repr(e.value) for e in InvoiceType)})",
@@ -127,6 +123,11 @@ class Invoice(BaseModel):
         CheckConstraint("cess_amount >= 0", name="check_invoice_cess_non_negative"),
         CheckConstraint("outstanding_amount >= 0", name="check_invoice_outstanding_non_negative"),
 
+        CheckConstraint("credited_amount >= 0 AND credited_amount <= total_amount",
+                name="check_invoice_credited_not_exceed_total"),
+                
+        CheckConstraint("refunded_amount >= 0 AND refunded_amount <= paid_amount",
+                name="check_invoice_refunded_valid"),
         # Invoice number is unique within a business
         # businesses to use the same numbering sequence(eg: two tenants having INV -001)
         UniqueConstraint(
@@ -146,8 +147,21 @@ class Invoice(BaseModel):
         # Status filter: to get outstanding, draft or overdue invoice lists 
         Index("idx_invoices_tenant_status",  "tenant_id", "invoice_status"),
 
-        # Party filter: all invoices for a specific customer/vendor ledgers 
-        Index("idx_invoices_tenant_party", "tenant_id", "party_id"),
+        # Keyset list: ORDER BY invoice_date DESC, id DESC within a tenant
+        Index("idx_invoices_tenant_date_id", "tenant_id", "invoice_date", "id"),
+
+        # Replaces idx_invoices_tenant_party. Serves party ledgers AND the
+        # duplicate-invoice check (party_id + created_at >= cutoff).
+        Index("idx_invoices_tenant_party_created", "tenant_id", "party_id", "created_at"),
+
+        # Credit note lookups: get_total_credited and
+        # get_active_credit_note_for_original. Partial, since most invoices
+        # have no original and shouldn't bloat the index.
+        Index(
+            "idx_invoices_tenant_original",
+            "tenant_id", "original_invoice_id",
+            postgresql_where=text("original_invoice_id IS NOT NULL"),
+        ),
 
         # Invoice type + financial year: GSTR -1/ GSTR 3B scoped to a financial year 
         Index(
@@ -200,7 +214,7 @@ class Invoice(BaseModel):
  
     # GST SUPPLY CLASSIFICATION
     # supply_type: determined by comparing tenant.state_code vs party_state_code
-    # place_of_supply: 2-digit state code; "96" for exports
+    # place_of_supply: 2-digit state code; "97" for exports
     # reverse_charge: RCM applies when purchasing from unregistered dealers
     supply_type: Mapped[SupplyType] = mapped_column(
         String(15), 
@@ -219,44 +233,68 @@ class Invoice(BaseModel):
     # Stored at invoice level as SUM of line item amounts.
     # Never recompute from line items after creation — use stored values.
 
-    subtotal: Mapped[Decimal] = mapped_column(Numeric(15, 2), nullable=False)
+    subtotal: Mapped[Decimal] = mapped_column(Numeric(17, 2), nullable=False)
 
     discount_amount: Mapped[Decimal] = mapped_column(
-        Numeric(15, 2), nullable=False, default=Decimal("0"),
+        Numeric(17, 2), nullable=False, default=Decimal("0"),
         server_default=text("0")
     )
 
-    taxable_amount: Mapped[Decimal] = mapped_column(Numeric(15, 2), nullable=False)
+    taxable_amount: Mapped[Decimal] = mapped_column(Numeric(17, 2), nullable=False)
 
     cgst_amount: Mapped[Decimal] = mapped_column(
-        Numeric(15, 2), nullable=False, default=Decimal("0"),
+        Numeric(17, 2), nullable=False, default=Decimal("0"),
         server_default=text("0")
     )
 
     sgst_amount: Mapped[Decimal] = mapped_column(
-        Numeric(15, 2), nullable=False, default=Decimal("0"),
+        Numeric(17, 2), nullable=False, default=Decimal("0"),
         server_default=text("0")
     )
 
     igst_amount: Mapped[Decimal] = mapped_column(
-        Numeric(15, 2), nullable=False, default=Decimal("0"),
+        Numeric(17, 2), nullable=False, default=Decimal("0"),
         server_default=text("0")
     )
     cess_amount: Mapped[Decimal] = mapped_column(
-        Numeric(15, 2), nullable=False, default=Decimal("0"),
+        Numeric(17, 2), nullable=False, default=Decimal("0"),
         server_default=text("0")
     )
 
-    total_amount: Mapped[Decimal] = mapped_column(Numeric(15, 2), nullable=False)
+    total_amount: Mapped[Decimal] = mapped_column(Numeric(17, 2), nullable=False)
     
+    # cash received (active payments only)
     paid_amount: Mapped[Decimal] = mapped_column(
-        Numeric(15,2), nullable=False, default=Decimal("0"),
+        Numeric(17,2), nullable=False, default=Decimal("0"),
         server_default=text("0")
     )
+
+    # sum of sent credit notes against this invoice
+    credited_amount: Mapped[Decimal] = mapped_column(
+        Numeric(17, 2), nullable=False, default=Decimal("0"), server_default=text("0")
+    )  
+
+    # sum of active refunds paid out
+    refunded_amount: Mapped[Decimal] = mapped_column(
+        Numeric(17, 2), nullable=False, default=Decimal("0"), server_default=text("0")
+    )  
 
     outstanding_amount: Mapped[Decimal] = mapped_column(
-        Numeric(15,2), 
-        Computed("total_amount - paid_amount", persisted = True)
+        Numeric(17, 2),
+        Computed(
+            "CASE WHEN invoice_type = 'credit_note' THEN 0 "
+            "ELSE GREATEST(total_amount - credited_amount - paid_amount + refunded_amount, 0) END",
+            persisted=True,
+        ),
+    )
+
+    refund_due_amount: Mapped[Decimal] = mapped_column(
+        Numeric(17, 2),
+        Computed(
+            "CASE WHEN invoice_type = 'credit_note' THEN 0 "
+            "ELSE GREATEST(paid_amount + credited_amount - refunded_amount - total_amount, 0) END",
+            persisted=True,
+        ),
     )
     
     # Status 
@@ -266,12 +304,6 @@ class Invoice(BaseModel):
         String(20), 
         nullable=False, 
         server_default=text(f"'{InvoiceStatus.DRAFT.value}'")
-    )
-
-    payment_status: Mapped[PaymentStatus] = mapped_column(
-        String(20), 
-        nullable=False, 
-        server_default=text(f"'{PaymentStatus.UNPAID.value}'")
     )
 
     # NOTES AND TERMS — operational, not used in tax logic
@@ -292,7 +324,8 @@ class Invoice(BaseModel):
     )
 
     # IMMUTABILITY LOCK
-    # Set to True when invoice is filed in GSTR-1.
+    # is_locked: "Set to True when the invoice is submitted (send_invoice). 
+    #    Immutable from then on."
     # Service layer MUST check this before any mutation and raise 409.
     # locked_at and locked_by: audit trail for the lock action.
     # Dependency: users.id — user.py must be migrated before invoices.
@@ -327,6 +360,25 @@ class Invoice(BaseModel):
         ForeignKey("users.id", ondelete="SET NULL"), 
         nullable=True
     )
+
+    # VOID AUDIT TRAIL
+    # Set when an invoice is voided (issued in error, before any payment
+    # was received — see ledger_rules for the exact voidable-state rule).
+    # Mirrors the cancellation audit pattern on Payment: never delete,
+    # record who/when/why. voided_at doubles as the "is this voided"
+    # check alongside invoice_status == "void" — both are set together,
+    # atomically, in the same UPDATE.
+    voided_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    voided_by: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True
+    )
+
+    void_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Relationships - Inter Relations between the tables at a Python level 
     # Invoice belongs to One to One relationships with (tenant,party,  Invoice(self reference))

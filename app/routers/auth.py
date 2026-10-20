@@ -109,6 +109,11 @@ async def logout(
     Revokes the provided refresh token.
     The 15-minute access token expires naturally.
     """
-    await auth_service.logout(db, refresh_token=request.refresh_token, tenant_id=current_user.tenant_id)
+    await auth_service.logout(
+        db, 
+        refresh_token=request.refresh_token, 
+        tenant_id=current_user.tenant_id,
+        user_id=current_user.sub
+    )
     # 204 responses have no body — FastAPI handles this automatically
     # when status_code=204 is set and the function returns None

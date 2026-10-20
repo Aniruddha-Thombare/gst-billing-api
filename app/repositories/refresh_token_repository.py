@@ -61,9 +61,25 @@ async def get_by_raw_token(db: AsyncSession, *, raw_token: str, tenant_id: UUID)
     return result.scalar_one_or_none()
 
 
-async def revoke(db: AsyncSession, *, raw_token: str, tenant_id:UUID) -> None:
+async def revoke(db: AsyncSession, *, raw_token: str, tenant_id:UUID, user_id: UUID) -> None:
     """
-    Mark a specific refresh token as revoked.
+    Mark a specific refresh token as revoked — but ONLY if it belongs to
+    the authenticated caller (user_id, from their access token).
+
+    WHY the user_id filter: without it, an authenticated user could
+    revoke ANY refresh token in their tenant by supplying its raw string
+    in the logout body — silently ending another user's session, since
+    the previous version of this query only checked tenant_id, not
+    ownership. This is the same "don't trust just the shape of the
+    request, check ownership" principle already applied throughout this
+    project (e.g. invoice_repository.get_by_id_for_update always scopes
+    by tenant_id; this extends that scoping one level further, to the
+    specific user).
+
+    If the hash doesn't match, or belongs to a different user, this
+    UPDATE simply matches zero rows — logout stays idempotent and
+    silent either way, revealing nothing about whether the submitted
+    token existed or belonged to someone else.Mark a specific refresh token as revoked.
     Called on: POST /auth/logout
     
     Sets revoked_at to now. The token remains in the DB (for audit trail)
@@ -74,7 +90,8 @@ async def revoke(db: AsyncSession, *, raw_token: str, tenant_id:UUID) -> None:
         update(RefreshToken)
         .where(
             RefreshToken.token_hash == token_hash,
-            RefreshToken.tenant_id == tenant_id
+            RefreshToken.tenant_id == tenant_id,
+            RefreshToken.user_id == user_id,
         )
         .values(revoked_at=datetime.now(timezone.utc))
         .execution_options(synchronize_session=False)

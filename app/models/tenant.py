@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from app.models.sequence import InvoiceSequence
     from app.models.payment import Payment
     from app.models.party import Party
+    from app.models.tenant_compliance import TenantCompliance
 
 
 class Tenant(BaseModel):
@@ -67,7 +68,7 @@ class Tenant(BaseModel):
         # pan + gstin columns are indexed via UniqueConstraint
         UniqueConstraint("gstin", name="uq_tenant_gstin"),
 
-        UniqueConstraint("pan",   name="uq_tenant_pan"),
+        UniqueConstraint("pan", name="uq_tenant_pan"),
 
         # Authentication requirement - As every time user will login in with email
         # No two tenants can shared same email ID
@@ -172,6 +173,12 @@ class Tenant(BaseModel):
     payments : Mapped[List["Payment"]] = relationship(
         "Payment", 
         back_populates="tenant", 
+        lazy="noload"
+    )
+
+    compliance_profiles: Mapped[List["TenantCompliance"]] = relationship(
+        "TenantCompliance",
+        back_populates="tenant",
         lazy="noload"
     )
     

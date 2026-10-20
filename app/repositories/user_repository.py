@@ -12,15 +12,13 @@ async def get_by_email(db: AsyncSession, *, email: str) -> User | None:
     """
     Fetch a user by email address.
     
-    Note: email alone is NOT unique globally in a multi-tenant system.
-    The same email can exist across multiple tenants.
-    
-    We do NOT filter by tenant_id here because during login, we first
-    find the user by email, then verify the password, then get tenant_id
-    from the user record itself. The tenant_id is returned WITH the user.
-    
-    If your business requirement is "one email globally unique", add
-    tenant_id filter here. Architecture doc says per-tenant uniqueness.
+    Email is GLOBALLY unique across the entire platform (see
+    User.uq_user_email — a plain UniqueConstraint on email alone, not
+    scoped to tenant_id). One email belongs to exactly one user, in
+    exactly one tenant, ever. This is why login can look a user up by
+    email alone, with no tenant_id filter — there is structurally never
+    more than one match.
+
     """
     result = await db.execute(
         select(User).where(User.email == email.lower())

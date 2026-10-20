@@ -56,6 +56,14 @@ async def get_current_user(
             # Required by HTTP spec when returning 401
         )
 
+    # step 2: if Authorization: Bearer is present, but no token string 
+    if not credentials.credentials.strip():
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"message": "JWT Token string missing.", "code": "NO_TOKEN"},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
     # Step 2: Decode the token
     try:
         payload = decode_token(
@@ -84,7 +92,7 @@ async def get_current_user(
 
 # ── ROLE-BASED ACCESS CONTROL ─────────────────────────────────────────────────
 
-def require_role(*allowed_roles: str):
+def   require_role(*allowed_roles: str):
     """
     Returns a dependency that enforces role-based access.
     

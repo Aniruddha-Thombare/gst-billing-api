@@ -2,13 +2,15 @@ from __future__ import annotations
 from uuid import UUID
 from decimal import Decimal
 from typing import TYPE_CHECKING
+
 from sqlalchemy.sql import text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy import Computed, ForeignKey, CheckConstraint, Index,Numeric, SmallInteger, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+
 from app.models.base import BaseModel
 from app.models.constants import HSN_SAC_CODE_REGEX
-
+from app.domain.tax_engine import GST_RATE_SLABS
 # Importing models for python level mapping
 if TYPE_CHECKING:
     from app.models.invoice import Invoice
@@ -41,7 +43,7 @@ class InvoiceItem(BaseModel):
         CheckConstraint("quantity > 0", 
             name="check_invoice_item_quantity_positive"
         ),
-        # prevents zero or negative pricing, ensuring every line has a valid value.
+        # prevents negative pricing, ensuring every line has a valid value.
         CheckConstraint("rate > 0", name="check_invoice_item_rate_positive"),
 
         # Ensuring Line ordering (1,2,3...) is logical and positive
@@ -62,7 +64,7 @@ class InvoiceItem(BaseModel):
         # GST Compliance - Validates that the entered GST rate matches 
         # officially recognised Indian tax slabs
         CheckConstraint(
-            "gst_rate IN (0, 0.125, 0.25, 0.75, 1.5, 2.5, 3, 5, 6, 9, 12, 14, 18, 28)", 
+            f"gst_rate IN ({', '.join(str(rate) for rate in sorted(GST_RATE_SLABS))})",
             name="check_invoice_item_gst_rate_valid"
         ),
 
@@ -129,11 +131,11 @@ class InvoiceItem(BaseModel):
     )
 
     discount_amount: Mapped[Decimal] = mapped_column(
-        Numeric(15, 2), nullable=False, default=Decimal("0"),
+        Numeric(17, 2), nullable=False, default=Decimal("0"),
         server_default=text("0")
     )
 
-    taxable_amount: Mapped[Decimal] = mapped_column(Numeric(15, 2), nullable=False)
+    taxable_amount: Mapped[Decimal] = mapped_column(Numeric(17, 2), nullable=False)
 
     # GST RATES AND AMOUNTS — both stored, never recomputed
     # gst_rate: full rate (18%)
@@ -142,37 +144,37 @@ class InvoiceItem(BaseModel):
     # Exactly one of (cgst+sgst) OR igst will be non-zero per line item.
     
     gst_rate: Mapped[Decimal] = mapped_column(
-        Numeric(5, 2),  nullable=False, default=Decimal("0"),
+        Numeric(6, 3),  nullable=False, default=Decimal("0"),
         server_default=text("0")
     )
 
     cgst_rate: Mapped[Decimal] = mapped_column(
-        Numeric(5, 2),  nullable=False, default=Decimal("0"),
+        Numeric(7, 4),  nullable=False, default=Decimal("0"),
         server_default=text("0")
     )
 
     cgst_amount: Mapped[Decimal] = mapped_column(
-        Numeric(15, 2), nullable=False, default=Decimal("0"),
+        Numeric(17, 2), nullable=False, default=Decimal("0"),
         server_default=text("0")
     )
 
     sgst_rate: Mapped[Decimal] = mapped_column(
-        Numeric(5, 2),  nullable=False, default=Decimal("0"),
+        Numeric(7, 4),  nullable=False, default=Decimal("0"),
         server_default=text("0")
     )
 
     sgst_amount: Mapped[Decimal] = mapped_column(
-        Numeric(15, 2), nullable=False, default=Decimal("0"),
+        Numeric(17, 2), nullable=False, default=Decimal("0"),
         server_default=text("0")
     )
 
     igst_rate: Mapped[Decimal] = mapped_column(
-        Numeric(5, 2),  nullable=False, default=Decimal("0"),
+        Numeric(6, 3),  nullable=False, default=Decimal("0"),
         server_default=text("0")
     )
 
     igst_amount: Mapped[Decimal] = mapped_column(
-        Numeric(15, 2), nullable=False, default=Decimal("0"),
+        Numeric(17, 2), nullable=False, default=Decimal("0"),
         server_default=text("0")
     )
 
@@ -182,12 +184,12 @@ class InvoiceItem(BaseModel):
     )
 
     cess_amount: Mapped[Decimal] = mapped_column(
-        Numeric(15, 2), nullable=False, default=Decimal("0"),
+        Numeric(17, 2), nullable=False, default=Decimal("0"),
         server_default=text("0")
     )
 
     total_amount: Mapped[Decimal] = mapped_column(
-        Numeric(15, 2), 
+        Numeric(17, 2), 
         Computed(
             "taxable_amount + cgst_amount + sgst_amount + igst_amount + cess_amount",
             persisted=True

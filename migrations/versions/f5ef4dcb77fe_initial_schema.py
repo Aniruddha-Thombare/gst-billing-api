@@ -1,8 +1,8 @@
-"""initial_model_layer
+"""initial schema
 
-Revision ID: 361d9618be0c
+Revision ID: f5ef4dcb77fe
 Revises: 
-Create Date: 2026-05-08 17:04:53.318364
+Create Date: 2026-10-11 18:40:32.573833
 
 """
 from typing import Sequence, Union
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision: str = '361d9618be0c'
+revision: str = 'f5ef4dcb77fe'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -76,6 +76,23 @@ def upgrade() -> None:
     op.create_index('idx_tenant_deactivated_at', 'tenants', ['deactivated_at'], unique=False)
     op.create_index('idx_tenant_is_active', 'tenants', ['is_active'], unique=False)
     op.create_index('idx_tenant_registration_type', 'tenants', ['registration_type'], unique=False)
+    op.create_table('idempotency_keys',
+    sa.Column('tenant_id', sa.UUID(), nullable=False),
+    sa.Column('endpoint', sa.String(length=100), nullable=False),
+    sa.Column('idempotency_key', sa.String(length=200), nullable=False),
+    sa.Column('request_hash', sa.String(length=64), nullable=False),
+    sa.Column('status', sa.String(length=20), server_default=sa.text("'processing'"), nullable=False),
+    sa.Column('response_body', sa.Text(), nullable=True),
+    sa.Column('completed_at', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('id', sa.UUID(), server_default=sa.text('gen_random_uuid()'), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('NOW()'), nullable=False),
+    sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('NOW()'), nullable=False),
+    sa.Column('deleted_at', sa.DateTime(timezone=True), nullable=True),
+    sa.CheckConstraint("status IN ('processing', 'completed')", name='check_idempotency_status'),
+    sa.ForeignKeyConstraint(['tenant_id'], ['tenants.id'], ondelete='CASCADE'),
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('tenant_id', 'endpoint', 'idempotency_key', name='uq_idempotency_tenant_endpoint_key')
+    )
     op.create_table('invoice_sequences',
     sa.Column('tenant_id', sa.UUID(), nullable=False),
     sa.Column('invoice_type', sa.String(length=20), nullable=False),
@@ -86,42 +103,33 @@ def upgrade() -> None:
     sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('NOW()'), nullable=False),
     sa.Column('deleted_at', sa.DateTime(timezone=True), nullable=True),
     sa.CheckConstraint("financial_year ~ '^[0-9]{4}-[0-9]{2}$'", name='check_sequence_financial_year_format'),
-    sa.CheckConstraint("invoice_type IN ('sales', 'purchase', 'credit_note', 'debit_note')", name='check_sequence_invoice_type'),
+    sa.CheckConstraint("invoice_type IN ('sales', 'purchase', 'credit_note', 'debit_note', 'payment')", name='check_sequence_invoice_type'),
     sa.CheckConstraint("prefix IS NULL OR prefix ~ '^[A-Z0-9\\-]{1,20}$'", name='check_sequence_prefix_format'),
     sa.CheckConstraint('last_number >= 0', name='check_sequence_last_number_non_negative'),
     sa.ForeignKeyConstraint(['tenant_id'], ['tenants.id'], ondelete='RESTRICT'),
     sa.PrimaryKeyConstraint('tenant_id', 'invoice_type', 'financial_year')
     )
-    op.create_table('parties',
+    op.create_table('tenant_compliances',
     sa.Column('tenant_id', sa.UUID(), nullable=False),
-    sa.Column('name', sa.String(length=255), nullable=False),
-    sa.Column('gstin', sa.String(length=15), nullable=True),
-    sa.Column('pan', sa.String(length=10), nullable=True),
-    sa.Column('address_line1', sa.Text(), nullable=False),
-    sa.Column('address_line2', sa.Text(), nullable=True),
-    sa.Column('city', sa.String(length=100), nullable=False),
-    sa.Column('pincode', sa.String(length=6), nullable=False),
-    sa.Column('state_code', sa.String(length=2), nullable=False),
-    sa.Column('email', sa.String(length=255), nullable=True),
-    sa.Column('phone', sa.String(length=20), nullable=True),
-    sa.Column('party_type', sa.String(length=20), server_default=sa.text("'customer'"), nullable=False),
-    sa.Column('is_active', sa.Boolean(), server_default=sa.text('true'), nullable=False),
+    sa.Column('financial_year', sa.String(length=7), nullable=False),
+    sa.Column('annual_turnover', sa.Numeric(precision=17, scale=2), server_default=sa.text('0'), nullable=False),
+    sa.Column('composition_turnover', sa.Numeric(precision=17, scale=2), server_default=sa.text('0'), nullable=False),
+    sa.Column('is_msme', sa.Boolean(), server_default=sa.text('false'), nullable=False),
+    sa.Column('effective_from', sa.Date(), nullable=False),
+    sa.Column('effective_to', sa.Date(), nullable=True),
     sa.Column('id', sa.UUID(), server_default=sa.text('gen_random_uuid()'), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('NOW()'), nullable=False),
     sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('NOW()'), nullable=False),
     sa.Column('deleted_at', sa.DateTime(timezone=True), nullable=True),
-    sa.CheckConstraint("gstin IS NULL OR gstin ~ '^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$'", name='check_party_gstin_format'),
-    sa.CheckConstraint("pan IS NULL OR pan ~ '^[A-Z]{5}[0-9]{4}[A-Z]{1}$'", name='check_party_pan_format'),
-    sa.CheckConstraint("party_type IN ('customer', 'vendor')", name='check_party_type'),
-    sa.CheckConstraint("pincode ~ '^[1-9][0-9]{5}$'", name='check_pincode_format'),
-    sa.CheckConstraint("state_code ~ '^[0-9]{2}$'", name='check_state_code_format'),
-    sa.CheckConstraint('gstin IS NULL OR pan IS NULL OR SUBSTRING(gstin, 3, 10) = pan', name='check_party_gstin_pan_consistency'),
-    sa.ForeignKeyConstraint(['tenant_id'], ['tenants.id'], ondelete='RESTRICT'),
-    sa.PrimaryKeyConstraint('id')
+    sa.CheckConstraint("financial_year ~ '^[0-9]{4}-[0-9]{2}$' ", name='check_tenant_compliant_financial_year'),
+    sa.CheckConstraint('annual_turnover >= 0', name='check_tenant_annual_turnover_positive'),
+    sa.CheckConstraint('composition_turnover >= 0', name='check_tenant_composition_turnover_positive'),
+    sa.CheckConstraint('effective_to IS NULL OR effective_to >= effective_from', name='check_effective_dates'),
+    sa.ForeignKeyConstraint(['tenant_id'], ['tenants.id'], ondelete='CASCADE'),
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('tenant_id', 'financial_year', name='uq_tenant_financial_year')
     )
-    op.create_index('idx_party_tenant_active', 'parties', ['tenant_id', 'is_active'], unique=False)
-    op.create_index('idx_party_tenant_type', 'parties', ['tenant_id', 'party_type'], unique=False)
-    op.create_index('uq_party_tenant_gstin', 'parties', ['tenant_id', 'gstin'], unique=True, postgresql_where=sa.text('gstin IS NOT NULL'))
+    op.create_index('idx_tenant_compliance_financial_year', 'tenant_compliances', ['tenant_id', 'financial_year'], unique=False)
     op.create_table('users',
     sa.Column('tenant_id', sa.UUID(), nullable=False),
     sa.Column('email', sa.String(length=255), nullable=False),
@@ -140,12 +148,64 @@ def upgrade() -> None:
     sa.CheckConstraint('failed_login_attempts >= 0', name='check_failed_login_attempts_non_negative'),
     sa.ForeignKeyConstraint(['tenant_id'], ['tenants.id'], ondelete='CASCADE'),
     sa.PrimaryKeyConstraint('id'),
-    sa.UniqueConstraint('tenant_id', 'email', name='uq_user_tenant_email')
+    sa.UniqueConstraint('email', name='uq_user_email')
     )
     op.create_index('idx_user_locked_until', 'users', ['tenant_id', 'locked_until'], unique=False)
     op.create_index('idx_user_tenant_active', 'users', ['tenant_id', 'is_active'], unique=False)
     op.create_index('idx_user_tenant_last_login', 'users', ['tenant_id', 'last_login_at'], unique=False)
     op.create_index('idx_user_tenant_role', 'users', ['tenant_id', 'role'], unique=False)
+    op.create_table('parties',
+    sa.Column('tenant_id', sa.UUID(), nullable=False),
+    sa.Column('name', sa.String(length=255), nullable=False),
+    sa.Column('gstin', sa.String(length=15), nullable=True),
+    sa.Column('pan', sa.String(length=10), nullable=True),
+    sa.Column('address_line1', sa.Text(), nullable=False),
+    sa.Column('address_line2', sa.Text(), nullable=True),
+    sa.Column('city', sa.String(length=100), nullable=False),
+    sa.Column('pincode', sa.String(length=6), nullable=False),
+    sa.Column('state_code', sa.String(length=2), nullable=False),
+    sa.Column('email', sa.String(length=255), nullable=True),
+    sa.Column('phone', sa.String(length=20), nullable=True),
+    sa.Column('party_type', sa.String(length=20), server_default=sa.text("'customer'"), nullable=False),
+    sa.Column('is_active', sa.Boolean(), server_default=sa.text('true'), nullable=False),
+    sa.Column('created_by', sa.UUID(), nullable=True),
+    sa.Column('updated_by', sa.UUID(), nullable=True),
+    sa.Column('id', sa.UUID(), server_default=sa.text('gen_random_uuid()'), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('NOW()'), nullable=False),
+    sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('NOW()'), nullable=False),
+    sa.Column('deleted_at', sa.DateTime(timezone=True), nullable=True),
+    sa.CheckConstraint("gstin IS NULL OR gstin ~ '^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$'", name='check_party_gstin_format'),
+    sa.CheckConstraint("pan IS NULL OR pan ~ '^[A-Z]{5}[0-9]{4}[A-Z]{1}$'", name='check_party_pan_format'),
+    sa.CheckConstraint("party_type IN ('customer', 'vendor')", name='check_party_type'),
+    sa.CheckConstraint("pincode ~ '^[1-9][0-9]{5}$'", name='check_pincode_format'),
+    sa.CheckConstraint("state_code ~ '^[0-9]{2}$'", name='check_state_code_format'),
+    sa.CheckConstraint('gstin IS NULL OR pan IS NULL OR SUBSTRING(gstin, 3, 10) = pan', name='check_party_gstin_pan_consistency'),
+    sa.ForeignKeyConstraint(['created_by'], ['users.id'], ondelete='SET NULL'),
+    sa.ForeignKeyConstraint(['tenant_id'], ['tenants.id'], ondelete='RESTRICT'),
+    sa.ForeignKeyConstraint(['updated_by'], ['users.id'], ondelete='SET NULL'),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index('idx_party_tenant_active', 'parties', ['tenant_id', 'is_active'], unique=False)
+    op.create_index('idx_party_tenant_name_id', 'parties', ['tenant_id', 'name', 'id'], unique=False)
+    op.create_index('idx_party_tenant_type', 'parties', ['tenant_id', 'party_type'], unique=False)
+    op.create_index('uq_party_tenant_gstin', 'parties', ['tenant_id', 'gstin'], unique=True, postgresql_where=sa.text('gstin IS NOT NULL'))
+    op.create_table('refresh_tokens',
+    sa.Column('tenant_id', sa.UUID(), nullable=False),
+    sa.Column('user_id', sa.UUID(), nullable=False),
+    sa.Column('token_hash', sa.String(length=64), nullable=False),
+    sa.Column('expires_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('revoked_at', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('device_info', sa.Text(), nullable=True),
+    sa.Column('id', sa.UUID(), server_default=sa.text('gen_random_uuid()'), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('NOW()'), nullable=False),
+    sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('NOW()'), nullable=False),
+    sa.Column('deleted_at', sa.DateTime(timezone=True), nullable=True),
+    sa.ForeignKeyConstraint(['tenant_id'], ['tenants.id'], ondelete='CASCADE'),
+    sa.ForeignKeyConstraint(['user_id'], ['users.id'], ondelete='CASCADE'),
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('token_hash', name='uq_refresh_tokens_token_hash')
+    )
+    op.create_index('idx_refresh_tokens_user_active', 'refresh_tokens', ['user_id', 'revoked_at'], unique=False)
     op.create_table('invoices',
     sa.Column('tenant_id', sa.UUID(), nullable=False),
     sa.Column('invoice_number', sa.String(length=50), nullable=False),
@@ -159,18 +219,17 @@ def upgrade() -> None:
     sa.Column('supply_type', sa.String(length=15), server_default=sa.text("'intrastate'"), nullable=False),
     sa.Column('place_of_supply', sa.String(length=2), nullable=False),
     sa.Column('reverse_charge', sa.Boolean(), server_default=sa.text('false'), nullable=False),
-    sa.Column('subtotal', sa.Numeric(precision=15, scale=2), nullable=False),
-    sa.Column('discount_amount', sa.Numeric(precision=15, scale=2), server_default=sa.text('0'), nullable=False),
-    sa.Column('taxable_amount', sa.Numeric(precision=15, scale=2), nullable=False),
-    sa.Column('cgst_amount', sa.Numeric(precision=15, scale=2), server_default=sa.text('0'), nullable=False),
-    sa.Column('sgst_amount', sa.Numeric(precision=15, scale=2), server_default=sa.text('0'), nullable=False),
-    sa.Column('igst_amount', sa.Numeric(precision=15, scale=2), server_default=sa.text('0'), nullable=False),
-    sa.Column('cess_amount', sa.Numeric(precision=15, scale=2), server_default=sa.text('0'), nullable=False),
-    sa.Column('total_amount', sa.Numeric(precision=15, scale=2), nullable=False),
-    sa.Column('paid_amount', sa.Numeric(precision=15, scale=2), server_default=sa.text('0'), nullable=False),
-    sa.Column('outstanding_amount', sa.Numeric(precision=15, scale=2), sa.Computed('total_amount - paid_amount', persisted=True), nullable=False),
+    sa.Column('subtotal', sa.Numeric(precision=17, scale=2), nullable=False),
+    sa.Column('discount_amount', sa.Numeric(precision=17, scale=2), server_default=sa.text('0'), nullable=False),
+    sa.Column('taxable_amount', sa.Numeric(precision=17, scale=2), nullable=False),
+    sa.Column('cgst_amount', sa.Numeric(precision=17, scale=2), server_default=sa.text('0'), nullable=False),
+    sa.Column('sgst_amount', sa.Numeric(precision=17, scale=2), server_default=sa.text('0'), nullable=False),
+    sa.Column('igst_amount', sa.Numeric(precision=17, scale=2), server_default=sa.text('0'), nullable=False),
+    sa.Column('cess_amount', sa.Numeric(precision=17, scale=2), server_default=sa.text('0'), nullable=False),
+    sa.Column('total_amount', sa.Numeric(precision=17, scale=2), nullable=False),
+    sa.Column('paid_amount', sa.Numeric(precision=17, scale=2), server_default=sa.text('0'), nullable=False),
+    sa.Column('outstanding_amount', sa.Numeric(precision=17, scale=2), sa.Computed('total_amount - paid_amount', persisted=True), nullable=False),
     sa.Column('invoice_status', sa.String(length=20), server_default=sa.text("'draft'"), nullable=False),
-    sa.Column('payment_status', sa.String(length=20), server_default=sa.text("'unpaid'"), nullable=False),
     sa.Column('notes', sa.Text(), nullable=True),
     sa.Column('terms', sa.Text(), nullable=True),
     sa.Column('original_invoice_id', sa.UUID(), nullable=True),
@@ -179,6 +238,9 @@ def upgrade() -> None:
     sa.Column('locked_by', sa.UUID(), nullable=True),
     sa.Column('created_by', sa.UUID(), nullable=True),
     sa.Column('updated_by', sa.UUID(), nullable=True),
+    sa.Column('voided_at', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('voided_by', sa.UUID(), nullable=True),
+    sa.Column('void_reason', sa.Text(), nullable=True),
     sa.Column('id', sa.UUID(), server_default=sa.text('gen_random_uuid()'), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('NOW()'), nullable=False),
     sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('NOW()'), nullable=False),
@@ -187,8 +249,7 @@ def upgrade() -> None:
     sa.CheckConstraint(" (supply_type = 'intrastate' AND igst_amount = 0)  OR  (supply_type = 'interstate' AND cgst_amount = 0 AND sgst_amount = 0)  OR  (supply_type IN ('export', 'sez')   AND cgst_amount = 0 AND sgst_amount = 0)", name='check_invoice_gst_mutual_exclusivity'),
     sa.CheckConstraint("financial_year ~ '^[0-9]{4}-[0-9]{2}$'", name='check_invoice_financial_year_format'),
     sa.CheckConstraint("invoice_status IN ('draft', 'sent', 'partial', 'paid', 'overdue', 'cancelled', 'void')", name='check_invoice_status'),
-    sa.CheckConstraint("invoice_type IN ('sales', 'purchase', 'credit_note', 'debit_note')", name='check_invoice_type'),
-    sa.CheckConstraint("payment_status IN ('unpaid', 'partial', 'paid')", name='check_invoice_payment_status'),
+    sa.CheckConstraint("invoice_type IN ('sales', 'purchase', 'credit_note', 'debit_note', 'payment')", name='check_invoice_type'),
     sa.CheckConstraint("supply_type IN ('intrastate', 'interstate', 'export', 'sez')", name='check_invoice_supply_type'),
     sa.CheckConstraint('cess_amount >= 0', name='check_invoice_cess_non_negative'),
     sa.CheckConstraint('cgst_amount >= 0', name='check_invoice_cgst_non_negative'),
@@ -208,11 +269,14 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['party_id'], ['parties.id'], ondelete='RESTRICT'),
     sa.ForeignKeyConstraint(['tenant_id'], ['tenants.id'], ondelete='RESTRICT'),
     sa.ForeignKeyConstraint(['updated_by'], ['users.id'], ondelete='SET NULL'),
+    sa.ForeignKeyConstraint(['voided_by'], ['users.id'], ondelete='SET NULL'),
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('tenant_id', 'invoice_number', name='uq_invoice_tenant_number')
     )
+    op.create_index('idx_invoices_tenant_date_id', 'invoices', ['tenant_id', 'invoice_date', 'id'], unique=False)
     op.create_index('idx_invoices_tenant_date_type', 'invoices', ['tenant_id', 'invoice_date', 'invoice_type'], unique=False)
-    op.create_index('idx_invoices_tenant_party', 'invoices', ['tenant_id', 'party_id'], unique=False)
+    op.create_index('idx_invoices_tenant_original', 'invoices', ['tenant_id', 'original_invoice_id'], unique=False, postgresql_where=sa.text('original_invoice_id IS NOT NULL'))
+    op.create_index('idx_invoices_tenant_party_created', 'invoices', ['tenant_id', 'party_id', 'created_at'], unique=False)
     op.create_index('idx_invoices_tenant_status', 'invoices', ['tenant_id', 'invoice_status'], unique=False)
     op.create_index('idx_invoices_tenant_type_fy', 'invoices', ['tenant_id', 'invoice_type', 'financial_year'], unique=False)
     op.create_table('invoice_items',
@@ -225,18 +289,18 @@ def upgrade() -> None:
     sa.Column('quantity', sa.Numeric(precision=12, scale=3), nullable=False),
     sa.Column('rate', sa.Numeric(precision=15, scale=4), nullable=False),
     sa.Column('discount_percent', sa.Numeric(precision=5, scale=2), server_default=sa.text('0'), nullable=False),
-    sa.Column('discount_amount', sa.Numeric(precision=15, scale=2), server_default=sa.text('0'), nullable=False),
-    sa.Column('taxable_amount', sa.Numeric(precision=15, scale=2), nullable=False),
-    sa.Column('gst_rate', sa.Numeric(precision=5, scale=2), server_default=sa.text('0'), nullable=False),
-    sa.Column('cgst_rate', sa.Numeric(precision=5, scale=2), server_default=sa.text('0'), nullable=False),
-    sa.Column('cgst_amount', sa.Numeric(precision=15, scale=2), server_default=sa.text('0'), nullable=False),
-    sa.Column('sgst_rate', sa.Numeric(precision=5, scale=2), server_default=sa.text('0'), nullable=False),
-    sa.Column('sgst_amount', sa.Numeric(precision=15, scale=2), server_default=sa.text('0'), nullable=False),
-    sa.Column('igst_rate', sa.Numeric(precision=5, scale=2), server_default=sa.text('0'), nullable=False),
-    sa.Column('igst_amount', sa.Numeric(precision=15, scale=2), server_default=sa.text('0'), nullable=False),
+    sa.Column('discount_amount', sa.Numeric(precision=17, scale=2), server_default=sa.text('0'), nullable=False),
+    sa.Column('taxable_amount', sa.Numeric(precision=17, scale=2), nullable=False),
+    sa.Column('gst_rate', sa.Numeric(precision=6, scale=3), server_default=sa.text('0'), nullable=False),
+    sa.Column('cgst_rate', sa.Numeric(precision=7, scale=4), server_default=sa.text('0'), nullable=False),
+    sa.Column('cgst_amount', sa.Numeric(precision=17, scale=2), server_default=sa.text('0'), nullable=False),
+    sa.Column('sgst_rate', sa.Numeric(precision=7, scale=4), server_default=sa.text('0'), nullable=False),
+    sa.Column('sgst_amount', sa.Numeric(precision=17, scale=2), server_default=sa.text('0'), nullable=False),
+    sa.Column('igst_rate', sa.Numeric(precision=6, scale=3), server_default=sa.text('0'), nullable=False),
+    sa.Column('igst_amount', sa.Numeric(precision=17, scale=2), server_default=sa.text('0'), nullable=False),
     sa.Column('cess_rate', sa.Numeric(precision=5, scale=2), server_default=sa.text('0'), nullable=False),
-    sa.Column('cess_amount', sa.Numeric(precision=15, scale=2), server_default=sa.text('0'), nullable=False),
-    sa.Column('total_amount', sa.Numeric(precision=15, scale=2), sa.Computed('taxable_amount + cgst_amount + sgst_amount + igst_amount + cess_amount', persisted=True), nullable=False),
+    sa.Column('cess_amount', sa.Numeric(precision=17, scale=2), server_default=sa.text('0'), nullable=False),
+    sa.Column('total_amount', sa.Numeric(precision=17, scale=2), sa.Computed('taxable_amount + cgst_amount + sgst_amount + igst_amount + cess_amount', persisted=True), nullable=False),
     sa.Column('id', sa.UUID(), server_default=sa.text('gen_random_uuid()'), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('NOW()'), nullable=False),
     sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('NOW()'), nullable=False),
@@ -244,7 +308,7 @@ def upgrade() -> None:
     sa.CheckConstraint("hsn_sac_code IS NULL OR hsn_sac_code ~ '^[0-9]{4,8}$'", name='check_invoice_item_hsn_sac_format'),
     sa.CheckConstraint('(igst_amount = 0 AND igst_rate = 0) OR (cgst_amount = 0 AND sgst_amount = 0 AND cgst_rate = 0 AND sgst_rate = 0)', name='check_invoice_item_gst_mutual_exclusivity'),
     sa.CheckConstraint('discount_percent >= 0 AND discount_percent <= 100', name='check_invoice_item_discount_percent_range'),
-    sa.CheckConstraint('gst_rate IN (0, 0.125, 0.25, 0.75, 1.5, 2.5, 3, 5, 6, 9, 12, 14, 18, 28)', name='check_invoice_item_gst_rate_valid'),
+    sa.CheckConstraint('gst_rate IN (0, 0.1, 0.125, 0.25, 0.75, 1, 1.5, 2.5, 3, 5, 6, 7.5, 9, 12, 14, 18, 28, 40)', name='check_invoice_item_gst_rate_valid'),
     sa.CheckConstraint('line_number > 0', name='check_invoice_item_line_number_positive'),
     sa.CheckConstraint('quantity > 0', name='check_invoice_item_quantity_positive'),
     sa.CheckConstraint('rate > 0', name='check_invoice_item_rate_positive'),
@@ -259,13 +323,18 @@ def upgrade() -> None:
     sa.Column('tenant_id', sa.UUID(), nullable=False),
     sa.Column('invoice_id', sa.UUID(), nullable=False),
     sa.Column('payment_date', sa.Date(), nullable=False),
-    sa.Column('amount', sa.Numeric(precision=15, scale=2), nullable=False),
+    sa.Column('amount', sa.Numeric(precision=17, scale=2), nullable=False),
     sa.Column('payment_mode', sa.String(length=30), server_default=sa.text("'cash'"), nullable=False),
     sa.Column('reference_number', sa.String(length=100), nullable=True),
     sa.Column('bank_name', sa.String(length=100), nullable=True),
+    sa.Column('payment_number', sa.String(length=50), nullable=False),
     sa.Column('is_realized', sa.Boolean(), server_default=sa.text('false'), nullable=False),
     sa.Column('notes', sa.Text(), nullable=True),
     sa.Column('created_by', sa.UUID(), nullable=True),
+    sa.Column('status', sa.String(length=20), server_default=sa.text("'active'"), nullable=False),
+    sa.Column('cancelled_at', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('cancelled_by', sa.UUID(), nullable=True),
+    sa.Column('cancellation_reason', sa.Text(), nullable=True),
     sa.Column('id', sa.UUID(), server_default=sa.text('gen_random_uuid()'), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('NOW()'), nullable=False),
     sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('NOW()'), nullable=False),
@@ -273,42 +342,59 @@ def upgrade() -> None:
     sa.CheckConstraint("payment_mode = 'cash' OR reference_number IS NOT NULL", name='check_payment_reference_required_for_non_cash'),
     sa.CheckConstraint("payment_mode IN ('cash', 'bank_transfer', 'upi', 'cheque', 'credit_card')", name='check_payments_payment_mode'),
     sa.CheckConstraint("payment_mode NOT IN ('cheque', 'bank_transfer') OR bank_name IS NOT NULL", name='check_payment_bank_name_required_for_bank_cheque'),
+    sa.CheckConstraint("status IN ('active', 'cancelled')", name='check_payments_status'),
     sa.CheckConstraint('amount > 0', name='check_payments_amount_positive'),
+    sa.ForeignKeyConstraint(['cancelled_by'], ['users.id'], ondelete='SET NULL'),
     sa.ForeignKeyConstraint(['created_by'], ['users.id'], ondelete='SET NULL'),
     sa.ForeignKeyConstraint(['invoice_id'], ['invoices.id'], ondelete='RESTRICT'),
     sa.ForeignKeyConstraint(['tenant_id'], ['tenants.id'], ondelete='RESTRICT'),
-    sa.PrimaryKeyConstraint('id')
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('tenant_id', 'payment_number', name='uq_payments_tenant_number')
     )
     op.create_index('idx_payments_invoiceid', 'payments', ['invoice_id'], unique=False)
+    op.create_index('idx_payments_tenant_date_id', 'payments', ['tenant_id', 'payment_date', 'id'], unique=False)
     op.create_index('idx_payments_tenant_mode_date', 'payments', ['tenant_id', 'payment_mode', 'payment_date'], unique=False)
     op.create_index('idx_payments_tenant_realized', 'payments', ['tenant_id', 'is_realized', 'payment_date'], unique=False)
+    op.create_index('idx_payments_tenant_status', 'payments', ['tenant_id', 'status'], unique=False)
+    op.create_index('uq_payments_tenant_refnum', 'payments', ['tenant_id', 'reference_number'], unique=True, postgresql_where=sa.text("reference_number IS NOT NULL AND status = 'active'"))
     # ### end Alembic commands ###
 
 
 def downgrade() -> None:
     """Downgrade schema."""
     # ### commands auto generated by Alembic - please adjust! ###
+    op.drop_index('uq_payments_tenant_refnum', table_name='payments', postgresql_where=sa.text("reference_number IS NOT NULL AND status = 'active'"))
+    op.drop_index('idx_payments_tenant_status', table_name='payments')
     op.drop_index('idx_payments_tenant_realized', table_name='payments')
     op.drop_index('idx_payments_tenant_mode_date', table_name='payments')
+    op.drop_index('idx_payments_tenant_date_id', table_name='payments')
     op.drop_index('idx_payments_invoiceid', table_name='payments')
     op.drop_table('payments')
     op.drop_index('idx_invoice_item_tenant_invoice', table_name='invoice_items')
     op.drop_table('invoice_items')
     op.drop_index('idx_invoices_tenant_type_fy', table_name='invoices')
     op.drop_index('idx_invoices_tenant_status', table_name='invoices')
-    op.drop_index('idx_invoices_tenant_party', table_name='invoices')
+    op.drop_index('idx_invoices_tenant_party_created', table_name='invoices')
+    op.drop_index('idx_invoices_tenant_original', table_name='invoices', postgresql_where=sa.text('original_invoice_id IS NOT NULL'))
     op.drop_index('idx_invoices_tenant_date_type', table_name='invoices')
+    op.drop_index('idx_invoices_tenant_date_id', table_name='invoices')
     op.drop_table('invoices')
+    op.drop_index('idx_refresh_tokens_user_active', table_name='refresh_tokens')
+    op.drop_table('refresh_tokens')
+    op.drop_index('uq_party_tenant_gstin', table_name='parties', postgresql_where=sa.text('gstin IS NOT NULL'))
+    op.drop_index('idx_party_tenant_type', table_name='parties')
+    op.drop_index('idx_party_tenant_name_id', table_name='parties')
+    op.drop_index('idx_party_tenant_active', table_name='parties')
+    op.drop_table('parties')
     op.drop_index('idx_user_tenant_role', table_name='users')
     op.drop_index('idx_user_tenant_last_login', table_name='users')
     op.drop_index('idx_user_tenant_active', table_name='users')
     op.drop_index('idx_user_locked_until', table_name='users')
     op.drop_table('users')
-    op.drop_index('uq_party_tenant_gstin', table_name='parties', postgresql_where=sa.text('gstin IS NOT NULL'))
-    op.drop_index('idx_party_tenant_type', table_name='parties')
-    op.drop_index('idx_party_tenant_active', table_name='parties')
-    op.drop_table('parties')
+    op.drop_index('idx_tenant_compliance_financial_year', table_name='tenant_compliances')
+    op.drop_table('tenant_compliances')
     op.drop_table('invoice_sequences')
+    op.drop_table('idempotency_keys')
     op.drop_index('idx_tenant_registration_type', table_name='tenants')
     op.drop_index('idx_tenant_is_active', table_name='tenants')
     op.drop_index('idx_tenant_deactivated_at', table_name='tenants')

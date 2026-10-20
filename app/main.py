@@ -6,29 +6,30 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.core.exceptions import GSTBillingException
-from app.routers import auth as auth_router
+from app.routers import (
+    auth as auth_router, invoices as invoice_router, 
+    payments as payment_router, parties as party_router,
+    refunds as refund_router 
+)
 
 
-# LIFESPAN 
+# LIFESPAN
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
     Runs code at application startup and shutdown.
-    
-    Anything BEFORE the yield → runs at startup (once, when app boots)
-    Anything AFTER the yield  → runs at shutdown (once, when app stops)
-    
-    Use for: DB connection pool warm-up, Redis connection, loading caches.
-    Replaces the old @app.on_event("startup") pattern (deprecated in FastAPI).
+
+    Anything BEFORE the yield runs once at startup.
+    Anything AFTER the yield runs once at shutdown.
     """
     # STARTUP
     print(f"Starting {settings.APP_NAME} in {settings.ENVIRONMENT} mode")
     # Future: initialize Redis connection, warm up connection pool, etc.
 
-    yield   # application runs here — handling requests
+    yield   # application runs here, handling requests
 
     # SHUTDOWN
-    print("Shutting down — closing connections")
+    print("Shutting down - closing connections")
     # Future: close Redis, drain background task queues, etc.
 
 
@@ -40,13 +41,12 @@ app = FastAPI(
     lifespan=lifespan,
 
     # In production, disable the docs endpoints
-    # They expose your API structure to anyone with the URL
     docs_url="/docs" if settings.ENVIRONMENT != "production" else None,
     redoc_url="/redoc" if settings.ENVIRONMENT != "production" else None,
 )
 
 
-# CORS MIDDLEWARE 
+# CORS MIDDLEWARE
 app.add_middleware(
     CORSMiddleware,
     # In production: replace with your actual frontend domain(s)
@@ -57,33 +57,16 @@ app.add_middleware(
 )
 
 
-# GLOBAL EXCEPTION HANDLER 
+# GLOBAL EXCEPTION HANDLER
 @app.exception_handler(GSTBillingException)
 async def gst_exception_handler(
     _request: Request,
     exc: GSTBillingException,
 ) -> JSONResponse:
     """
-    Catches ANY GSTBillingException raised anywhere in the application.
-    
-    Because every custom exception inherits from GSTBillingException,
-    this single handler covers:
-      - AuthenticationError (401)
-      - DuplicateGSTINError (409)
-      - InvoiceLockedError (409)
-      - PaymentExceedsOutstandingError (422)
-      - ALL others defined in exceptions.py
-    
-    Returns a consistent JSON error format across the entire API:
-      {
-        "error": {
-          "code": "DUPLICATE_GSTIN",
-          "message": "GSTIN '27AAPFU...' is already registered."
-        }
-      }
-    
-    This consistency means the frontend can write ONE error handler
-    instead of parsing different error formats per endpoint.
+    Catches ANY GSTBillingException raised anywhere in the application and
+    returns one consistent JSON error format:
+      {"error": {"code": "DUPLICATE_GSTIN", "message": "..."}}
     """
     return JSONResponse(
         status_code=exc.status_code,
@@ -96,22 +79,22 @@ async def gst_exception_handler(
     )
 
 
-# ROUTERS 
-app.include_router(
-    auth_router.router,
-    prefix="/api/v1",    # all auth endpoints will be /api/v1/auth/...
-)
-# Future routers added here:
-# app.include_router(invoice_router.router, prefix="/api/v1")
-# app.include_router(payment_router.router, prefix="/api/v1")
+# ROUTERS (each registered exactly once)
+app.include_router(auth_router.router, prefix="/api/v1")
+app.include_router(invoice_router.router, prefix="/api/v1")
+app.include_router(payment_router.invoice_payments_router, prefix="/api/v1")
+app.include_router(payment_router.payments_router, prefix= "/api/v1")
+app.include_router(party_router.router, prefix="/api/v1")
+app.include_router(refund_router.router, prefix="/api/v1")
+app.include_router(refund_router.refunds_router, prefix="/api/v1")
 
 
-# HEALTH CHECK 
+# HEALTH CHECK
 @app.get("/health", tags=["System"])
 async def health_check():
     """
     Used by Docker health checks and load balancers.
     Returns 200 if the app is running.
-    Does NOT check DB connectivity here — that is a separate /ready endpoint.
+    Does NOT check DB connectivity (that would be a separate /ready endpoint).
     """
     return {"status": "ok", "env": settings.ENVIRONMENT}
