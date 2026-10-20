@@ -59,6 +59,17 @@ class DuplicateGSTINError(GSTBillingException):
     def __init__(self, gstin: str) -> None:
         super().__init__(f"GSTIN '{gstin}' is already registered.", "DUPLICATE_GSTIN", 409)
 
+class DuplicatePANError(GSTBillingException):
+    """
+    A tenant with this PAN already exists (uq_tenant_pan). The platform
+    supports one tenant per PAN, so a second GSTIN under the same PAN
+    (for example a branch in another state) is rejected.
+    """
+    def __init__(self, pan:str) -> None:
+        super().__init__(f"Pan '{pan}' is already registered under another GSTIN.", 
+                        "DUPLICATE_PAN", 409
+                        )
+
 
 class DuplicateComplianceProfileError(GSTBillingException):
     """
@@ -73,6 +84,20 @@ class DuplicateComplianceProfileError(GSTBillingException):
             409,
         )
 
+
+class StateCodeMismatchError(GSTBillingException):
+    """
+    The first two digits of the GSTIN are the state code of registration.
+    A different state_code in the request would make every future invoice
+    classify supplies as intrastate or interstate incorrectly.
+    """
+    def __init__(self, gstin: str, state_code: str) -> None:
+        super().__init__(
+            f"GSTIN '{gstin}' belongs to state code '{gstin[:2]}', "
+            f"but state_code '{state_code}' was supplied.",
+            "STATE_CODE_MISMATCH",
+            422,
+        )
 
 # USER EXCEPTIONS
 
@@ -439,3 +464,50 @@ class InvalidListQueryError(GSTBillingException):
     """Bad cursor or inconsistent list filters (for example date_from after date_to)."""
     def __init__(self, message: str) -> None:
         super().__init__(message, "INVALID_LIST_QUERY", 422)
+
+
+class RefundExceedsDueError(GSTBillingException):
+    """Refund amount is more than the seller currently owes the customer on this invoice."""
+    def __init__(self, amount: Decimal, refund_due: Decimal, invoice_number: str) -> None:
+        super().__init__(
+            f"Refund ₹{amount} exceeds the refund due ₹{refund_due} on invoice '{invoice_number}'.",
+            "REFUND_EXCEEDS_DUE", 422,
+        )
+
+
+class RefundReferenceAlreadyUsedError(GSTBillingException):
+    def __init__(self, reference_number: str) -> None:
+        super().__init__(
+            f"Refund reference '{reference_number}' is already recorded for this tenant.",
+            "REFUND_REFERENCE_ALREADY_USED", 409,
+        )
+
+
+class PaymentCancelBlockedByRefundError(GSTBillingException):
+    """Cancelling this payment would leave more cash refunded than received."""
+    def __init__(self, invoice_number: str) -> None:
+        super().__init__(
+            f"This payment cannot be cancelled: refunds already paid on invoice "
+            f"'{invoice_number}' exceed the cash that would remain. Reverse the refund first.",
+            "PAYMENT_CANCEL_BLOCKED_BY_REFUND", 409,
+        )
+
+
+class RefundNotFoundError(GSTBillingException):
+    """Refund does not exist OR belongs to a different tenant (404 for both)."""
+    def __init__(self, identifier: str) -> None:
+        super().__init__(f"Refund '{identifier}' not found.", "REFUND_NOT_FOUND", 404)
+
+
+class RefundAlreadyCancelledError(GSTBillingException):
+    """409: the refund exists but is already cancelled (state conflict, not a bad request)."""
+    def __init__(self, refund_id: str, refund_number: str, cancelled_at: "datetime | None") -> None:
+        cancelled_str = (
+            cancelled_at.strftime("%d-%b-%Y %H:%M UTC") if cancelled_at else "unknown time"
+        )
+        super().__init__(
+            f"Refund '{refund_number}' (id: {refund_id}) has already been cancelled at "
+            f"{cancelled_str}.",
+            "REFUND_ALREADY_CANCELLED",
+            409,
+        )

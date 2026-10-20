@@ -10,19 +10,20 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services import idempotency_service
-from app.repositories import invoice_repository, payment_repository
+from app.repositories import invoice_repository, payment_repository, refund_repository
 from app.services import sequence_service
 from app.domain import ledger_rules
 from app.schemas.payment import (
     REFERENCE_REQUIRED_MODES, PaymentCreateRequest, PaymentResponse, 
     PaymentRecordedResponse
 )
+from app.core.db_errors import get_constraint_name
 from app.core.pagination import Page, encode_cursor, decode_date_cursor
 from app.core.exceptions import (
     InvoiceNotFoundError, InvoiceNotPayableError, InvoiceAlreadyPaidError,
     PaymentExceedsOutstandingError, PaymentReferenceAlreadyUsedError,
     PossibleDuplicatePaymentError, PaymentNotFoundError, PaymentAlreadyCancelledError,
-    InvalidListQueryError
+    InvalidListQueryError, PaymentCancelBlockedByRefundError
 )
 
 _MAX_SEQUENCE_RETRIES = 1
@@ -117,7 +118,7 @@ async def _retry_or_raise(
     - uq_payments_tenant_refnum: bank reference already used, clean 409.
     - anything else: re-raise.
     """
-    constraint = getattr(getattr(exc.orig, "diag", None), "constraint_name", None)
+    constraint = get_constraint_name(exc)
 
     if constraint == "invoice_sequences_pkey":
         if retry_count >= _MAX_SEQUENCE_RETRIES:
@@ -193,8 +194,10 @@ async def _record_payment_body(
                 elapsed_display=_format_elapsed(minutes_ago),
             )
 
-    allocation_result: ledger_rules.PaymentAllocationResult = ledger_rules.allocate_payment(
-        invoice_total=invoice.total_amount, previously_paid=invoice.paid_amount, new_payment=request.amount,
+    position = ledger_rules.apply_payment(
+        invoice_total=invoice.total_amount, paid_amount=invoice.paid_amount,
+        credited_amount=invoice.credited_amount, refunded_amount=invoice.refunded_amount,
+        new_payment=request.amount,
     )
     payment_number = await sequence_service.get_next_invoice_number(
         db, tenant_id=tenant_id, financial_year=invoice.financial_year, invoice_type="payment",
@@ -205,14 +208,15 @@ async def _record_payment_body(
         reference_number=request.reference_number, bank_name=request.bank_name,
         notes=request.notes, created_by=user_id,
     )
-    await invoice_repository.update_payment_state(
-        db, invoice_id=invoice_id, tenant_id=tenant_id, paid_amount=allocation_result.total_paid_after,
-        status=allocation_result.new_status, updated_by=user_id,
+    await invoice_repository.update_ledger_state(
+        db, invoice_id=invoice_id, tenant_id=tenant_id, paid_amount=position.paid_amount,
+        credited_amount=position.credited_amount, refunded_amount=position.refunded_amount,
+        status=position.status, updated_by=user_id,
     )
     return PaymentRecordedResponse(
         payment=PaymentResponse.model_validate(payment), invoice_id=invoice_id,
-        invoice_status=allocation_result.new_status, paid_amount=allocation_result.total_paid_after,
-        outstanding_amount=allocation_result.outstanding_after,
+        invoice_status=position.status, paid_amount=position.paid_amount,
+        outstanding_amount=position.outstanding_amount,
     )
 
 
@@ -267,26 +271,29 @@ async def cancel_payment(
                 cancelled_at=cancelled_at,
             )
 
-        # paid_amount is made of two things: active payments AND submitted
-        # credit notes (a credit note reduces the balance through paid_amount,
-        # exactly like a payment). Recompute from both, or cancelling a
-        # payment silently erases the credit. Safe under the invoice lock:
-        # sending a credit note needs this same lock, so the credit total
-        # cannot change mid-recompute.
+        # Recompute every ledger input from source rows under the invoice lock.
         active_payments_total = await payment_repository.get_total_paid_for_invoice(
             db, invoice_id=invoice.id, tenant_id=tenant_id,
         )
         credited_total = await invoice_repository.get_total_credited(
             db, original_invoice_id=invoice.id, tenant_id=tenant_id,
         )
-        remaining_paid = active_payments_total + credited_total
-        new_status = ledger_rules.derive_status_after_payment_cancellation(
-            remaining_paid, invoice.total_amount,
-        )
-
-        await invoice_repository.update_payment_state(
+        refunded_total = await refund_repository.get_total_active_for_invoice(
             db, invoice_id=invoice.id, tenant_id=tenant_id,
-            paid_amount=remaining_paid, status=new_status, updated_by=cancelled_by,
+        )
+        try:
+            position = ledger_rules.compute_ledger_position(
+                invoice_total=invoice.total_amount, paid_amount=active_payments_total,
+                credited_amount=credited_total, refunded_amount=refunded_total,
+            )
+        except ValueError as exc:
+            # Raising rolls back the soft-cancel above, so nothing is half-done.
+            raise PaymentCancelBlockedByRefundError(invoice.invoice_number) from exc
+
+        await invoice_repository.update_ledger_state(
+            db, invoice_id=invoice.id, tenant_id=tenant_id, paid_amount=position.paid_amount,
+            credited_amount=position.credited_amount, refunded_amount=position.refunded_amount,
+            status=position.status, updated_by=cancelled_by,
         )
 
     _enqueue_payment_cancelled_tasks(payment_id=str(payment_id), tenant_id=str(tenant_id))

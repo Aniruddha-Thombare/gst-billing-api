@@ -20,6 +20,7 @@ _DEFAULT_PREFIXES: dict[str, str] = {
     "credit_note": "CN",
     "debit_note": "DN",
     "payment": "PAY",
+    "refund": "REF",
 }
 
 # Zero-padded width for the sequence number: INV/2024-25/0001 (4 digits)

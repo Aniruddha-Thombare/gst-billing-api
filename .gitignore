@@ -12,6 +12,9 @@ __pycache__/
 # Packaging 
 *.egg-info/
 
+# sql files 
+*.sql
+
 # testing/ coverage
 .pytest_cache/
 .coverage

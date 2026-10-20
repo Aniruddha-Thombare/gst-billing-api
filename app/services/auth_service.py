@@ -12,20 +12,16 @@ from app.schemas.auth import (
 from app.core import security
 from app.models.enum import UserRole
 from app.domain.business_rules import get_financial_year
-
+from app.core.db_errors import get_constraint_name
 from app.core.security import TokenDecodeError
 from app.repositories import (
     tenant_repository, user_repository,
     refresh_token_repository, tenant_compliance_repository
 )
 from app.core.exceptions import (
-    AuthenticationError,
-    DuplicateGSTINError,
-    DuplicateEmailError,
-    UserInactiveError,
-    RefreshTokenRevokedError,
-    TokenInvalidError,
-    TokenExpiredError
+    AuthenticationError, DuplicateGSTINError, DuplicatePANError, 
+    DuplicateEmailError, StateCodeMismatchError, UserInactiveError,
+    RefreshTokenRevokedError, TokenInvalidError, TokenExpiredError
 )
 
 # A real bcrypt hash, built once at startup. Used when the email does not
@@ -43,6 +39,11 @@ async def register(
     profile, all in ONE transaction (any failure rolls back everything).
     Returns no tokens; the user logs in separately.
     """
+        # The GSTIN's first two digits ARE the state of registration. A different
+    # state_code would corrupt intrastate/interstate tax on every invoice.
+    if request.gstin[:2] != request.state_code:
+        raise StateCodeMismatchError(request.gstin, request.state_code)
+
     # bcrypt is CPU-heavy (~250ms). Run it in a thread so the event loop
     # keeps serving other requests, and do it BEFORE the transaction opens
     # so no DB connection is held while hashing.
@@ -54,6 +55,10 @@ async def register(
             existing_tenant = await tenant_repository.get_by_gstin(db, gstin=request.gstin)
             if existing_tenant:
                 raise DuplicateGSTINError(request.gstin)
+
+            existing_user = await user_repository.get_by_email(db, email=request.email)
+            if existing_user:
+                raise DuplicateEmailError(request.email)
 
             tenant = await tenant_repository.create(
                 db,
@@ -68,10 +73,6 @@ async def register(
                 email=request.email,
                 registration_type=request.registration_type,
             )
-
-            existing_user = await user_repository.get_by_email(db, email=request.email)
-            if existing_user:
-                raise DuplicateEmailError(request.email)
 
             user = await user_repository.create(
                 db,
@@ -102,14 +103,15 @@ async def register(
             )
 
     except IntegrityError as exc:
-        constraint = getattr(getattr(exc.orig, "diag", None), "constraint_name", None)
+        # Backstop for two identical registrations racing past the checks above.
+        constraint = get_constraint_name(exc)
         if constraint == "uq_tenant_gstin":
             raise DuplicateGSTINError(request.gstin) from exc
         if constraint in ("uq_user_email", "uq_tenant_email"):
             raise DuplicateEmailError(request.email) from exc
         if constraint == "uq_tenant_pan":
-            # One Tenant per PAN in this MVP (see earlier design note).
-            raise DuplicateGSTINError(request.gstin) from exc
+            # One Tenant per PAN in this MVP.
+            raise DuplicatePANError(request.gstin[2:12]) from exc
         raise
 
     return RegistrationResponse(

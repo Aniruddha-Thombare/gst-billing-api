@@ -48,7 +48,7 @@ async def create(
     Insert a new invoice header row and flush to obtain the generated id.
 
     Does NOT write outstanding_amount: it is a GENERATED column
-    (total_amount - paid_amount). A draft therefore reads
+    (Invoice total - Cash received - Credit notes + Cash returned). A draft therefore reads
     outstanding_amount == total_amount. AR and aging queries MUST filter
     on invoice_status IN ('sent', 'partial') and never rely on
     outstanding_amount alone, or drafts will be counted as receivables.
@@ -161,31 +161,22 @@ async def get_by_id_for_update(
     return result.scalar_one_or_none()
 
 
-async def update_payment_state(
-    db: AsyncSession,
-    *,
-    invoice_id: UUID,
-    tenant_id: UUID,
-    paid_amount: Decimal,
-    status: str,
-    updated_by: UUID,
+async def update_ledger_state(
+    db: AsyncSession, *, invoice_id: UUID, tenant_id: UUID, paid_amount: Decimal,
+    credited_amount: Decimal, refunded_amount: Decimal, status: str, updated_by: UUID,
 ) -> None:
     """
-    Applies a ledger change (payment recorded, payment cancelled, credit
-    note applied) to the invoice. Writes ONLY paid_amount and
-    invoice_status: outstanding_amount is GENERATED and recomputed by
-    Postgres.
-
+    Writes the four ledger inputs and the derived status. outstanding_amount
+    and refund_due_amount are GENERATED and recomputed by Postgres.
     Does NOT commit: caller wraps in a transaction.
     """
     await db.execute(
         update(Invoice)
         .where(Invoice.id == invoice_id, Invoice.tenant_id == tenant_id)
         .values(
-            paid_amount=paid_amount,
-            invoice_status=status,
-            updated_by=updated_by,
-            updated_at=datetime.now(timezone.utc),
+            paid_amount=paid_amount, credited_amount=credited_amount,
+            refunded_amount=refunded_amount, invoice_status=status,
+            updated_by=updated_by, updated_at=datetime.now(timezone.utc),
         )
         .execution_options(synchronize_session=False)
     )
@@ -230,19 +221,9 @@ async def update_submission_state(
     invoice_id: UUID,
     tenant_id: UUID,
     updated_by: UUID,
-    paid_amount: Decimal | None = None,
 ) -> None:
     """
     Transition invoice from draft to sent and lock it.
-
-    paid_amount is None for sales/purchase/debit_note submission:
-    paid_amount stays 0, so the GENERATED outstanding_amount equals
-    total_amount (a live receivable).
-
-    paid_amount is total_amount for a credit_note submission (passed by
-    invoice_service): a credit note is not a receivable, and
-    paid_amount == total_amount makes the GENERATED outstanding_amount 0
-    without ever writing to that column.
 
     Does NOT commit: caller wraps in a transaction.
     """
@@ -254,8 +235,6 @@ async def update_submission_state(
         "updated_by": updated_by,
         "updated_at": datetime.now(timezone.utc),
     }
-    if paid_amount is not None:
-        values["paid_amount"] = paid_amount
 
     await db.execute(
         update(Invoice)

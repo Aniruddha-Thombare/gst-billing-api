@@ -31,6 +31,10 @@ PAYABLE_STATES: frozenset[str] = frozenset({"sent", "partial"})
 # same defense-in-depth pattern as PAYABLE_STATES + the outstanding check).
 VOIDABLE_STATES: frozenset[str] = frozenset({"sent"})
 
+# A credit note may be issued against any submitted invoice, including a fully
+# paid one (the customer is then owed a refund). Draft and void never qualify.
+CREDITABLE_STATES: frozenset[str] = frozenset({"sent", "partial", "paid"})
+
 # Only sales and purchase invoices can be corrected by a credit note.
 # Crediting a credit note, a debit note or a payment receipt has no
 # meaning under the CGST Act, so the original's type is its own guard,
@@ -46,21 +50,6 @@ InvoiceStatus = Literal[
     "cancelled",
     "void",
 ]
-
-
-# IMMUTABLE RESULT OBJECTS 
-@dataclass(frozen=True)
-class PaymentAllocationResult:
-    """
-    Complete ledger state after applying a new payment to an invoice. 
-    """
-    invoice_total: Decimal       # Immutable — the original invoice amount
-    previously_paid: Decimal     # Total payments before this one
-    new_payment: Decimal         # The payment being applied now
-    total_paid_after: Decimal    # previously_paid + new_payment
-    outstanding_after: Decimal   # invoice_total − total_paid_after (min 0)
-    new_status: InvoiceStatus    # The status after this payment
-
 
 @dataclass(frozen=True)
 class InvoiceArithmeticReport: 
@@ -79,6 +68,129 @@ def _round(value: Decimal) -> Decimal:
     Private monetary rounding. Single point of control for rounding method.
     """
     return value.quantize(TWOPLACES, rounding=ROUND_HALF_UP)
+
+@dataclass(frozen=True)
+class LedgerPosition:
+    """
+    The full money position of one invoice, derived from its four components.
+      outstanding_amount: what the customer still owes the seller
+      refund_due_amount:  what the seller still owes the customer
+    At most one of the two is non-zero.
+    """
+    invoice_total: Decimal
+    paid_amount: Decimal        # cash received
+    credited_amount: Decimal    # credit notes applied
+    refunded_amount: Decimal    # cash returned
+    outstanding_amount: Decimal
+    refund_due_amount: Decimal
+    status: InvoiceStatus
+
+
+def compute_ledger_position(
+    *,
+    invoice_total: Decimal,
+    paid_amount: Decimal,
+    credited_amount: Decimal,
+    refunded_amount: Decimal,
+) -> LedgerPosition:
+    """
+    Single authoritative ledger formula, used by record payment, cancel
+    payment, send credit note and record refund. Pure, no DB access.
+
+        balance = total - credits - cash paid + refunds
+        balance > 0 -> customer owes it;  balance < 0 -> seller owes a refund.
+
+    Status: 'paid' when balance <= 0 and anything was paid or credited;
+    'partial' when something was paid (net of refunds) or credited; else 'sent'.
+    Raises ValueError if the components are impossible (ledger corruption).
+    """
+    if min(paid_amount, credited_amount, refunded_amount) < ZERO:
+        raise ValueError("Ledger corruption: negative ledger component.")
+    if credited_amount > invoice_total:
+        raise ValueError(
+            f"Ledger corruption: credits ₹{credited_amount} exceed invoice total ₹{invoice_total}."
+        )
+    if refunded_amount > paid_amount:
+        raise ValueError(
+            f"Ledger corruption: refunds ₹{refunded_amount} exceed cash received ₹{paid_amount}."
+        )
+
+    balance = _round(invoice_total - credited_amount - paid_amount + refunded_amount)
+    outstanding = max(balance, ZERO)
+    refund_due = max(-balance, ZERO)
+
+    if balance <= ZERO and (paid_amount > ZERO or credited_amount > ZERO):
+        status: InvoiceStatus = "paid"
+    elif (paid_amount - refunded_amount) > ZERO or credited_amount > ZERO:
+        status = "partial"
+    else:
+        status = "sent"
+
+    return LedgerPosition(
+        invoice_total=invoice_total, paid_amount=paid_amount,
+        credited_amount=credited_amount, refunded_amount=refunded_amount,
+        outstanding_amount=outstanding, refund_due_amount=refund_due, status=status,
+    )
+
+
+def apply_payment(
+    *, invoice_total: Decimal, paid_amount: Decimal, credited_amount: Decimal,
+    refunded_amount: Decimal, new_payment: Decimal,
+) -> LedgerPosition:
+    """Ledger position after receiving a payment. ValueError if it exceeds the outstanding balance."""
+    current = compute_ledger_position(
+        invoice_total=invoice_total, paid_amount=paid_amount,
+        credited_amount=credited_amount, refunded_amount=refunded_amount,
+    )
+    validate_payment_does_not_exceed_outstanding(new_payment, current.outstanding_amount)
+    return compute_ledger_position(
+        invoice_total=invoice_total, paid_amount=_round(paid_amount + new_payment),
+        credited_amount=credited_amount, refunded_amount=refunded_amount,
+    )
+
+
+def apply_credit_note(
+    *, invoice_total: Decimal, paid_amount: Decimal, credited_amount: Decimal,
+    refunded_amount: Decimal, credit_amount: Decimal,
+) -> LedgerPosition:
+    """
+    Ledger position after applying a credit note. Works on a fully paid
+    invoice too (it then creates a refund due). Total credits can never
+    exceed the invoice total.
+    """
+    if credit_amount <= ZERO:
+        raise ValueError(f"Credit note amount must be greater than zero. Received: ₹{credit_amount}")
+    new_credited = _round(credited_amount + credit_amount)
+    if new_credited > invoice_total:
+        raise ValueError(
+            f"Credit ₹{credit_amount} would take total credits to ₹{new_credited}, "
+            f"above the invoice total ₹{invoice_total}."
+        )
+    return compute_ledger_position(
+        invoice_total=invoice_total, paid_amount=paid_amount,
+        credited_amount=new_credited, refunded_amount=refunded_amount,
+    )
+
+
+def apply_refund(
+    *, invoice_total: Decimal, paid_amount: Decimal, credited_amount: Decimal,
+    refunded_amount: Decimal, refund_amount: Decimal,
+) -> LedgerPosition:
+    """Ledger position after paying a refund. ValueError if it exceeds the refund due."""
+    if refund_amount <= ZERO:
+        raise ValueError(f"Refund amount must be greater than zero. Received: ₹{refund_amount}")
+    current = compute_ledger_position(
+        invoice_total=invoice_total, paid_amount=paid_amount,
+        credited_amount=credited_amount, refunded_amount=refunded_amount,
+    )
+    if refund_amount > current.refund_due_amount:
+        raise ValueError(
+            f"Refund ₹{refund_amount} exceeds the refund due ₹{current.refund_due_amount}."
+        )
+    return compute_ledger_position(
+        invoice_total=invoice_total, paid_amount=paid_amount,
+        credited_amount=credited_amount, refunded_amount=_round(refunded_amount + refund_amount),
+    )
 
 
 #  ARITHMETIC VALIDATION 
@@ -114,32 +226,6 @@ def validate_invoice_arithmetic(
         discrepancy_amount= discrepancy,
     )
 
-# OUTSTANDING BALANCE 
-
-def calculate_outstanding_balance(
-    invoice_total: Decimal,
-    total_payments_received: Decimal,
-) -> Decimal:
-    """
-    Calculates the remaining unpaid balance on an invoice.
-    WHY max(ZERO, ...)?
-    Under normal operation, the service calls validate_payment_does_not_exceed_outstanding()
-    before this function, ensuring total_payments_received never exceeds invoice_total.
-    The max() provides a financial safety net for edge cases such as:
-      - Floating point conversions from legacy data imports
-      - Manual DB corrections by DBAs
-      - Currency rounding from multi-currency future features
-    A negative outstanding balance would corrupt the ledger.
-    This guard makes that physically impossible regardless of input.
-    """
-    if total_payments_received > invoice_total:
-        raise ValueError(
-            f"Ledger Corruption: Total payments (₹{total_payments_received}) "
-            f"exceed invoice total (₹{invoice_total})."
-        )
-    raw_balance = invoice_total - total_payments_received
-    return _round(max(ZERO, raw_balance))
-
 
 def validate_payment_does_not_exceed_outstanding(
     payment_amount: Decimal,
@@ -166,38 +252,6 @@ def validate_payment_does_not_exceed_outstanding(
             f"Payment ₹{payment_amount} exceeds "
             f"outstanding balance ₹{current_outstanding}."
         )
-
-
-def allocate_payment(
-    invoice_total: Decimal,
-    previously_paid: Decimal,
-    new_payment: Decimal,
-) -> PaymentAllocationResult:
-    """
-    Applies a new payment to an invoice and returns the complete new ledger state.
-
-    This is the single authoritative place where payment state transitions
-    are computed. The payment_service calls this, then persists all returned
-    values atomically inside a single `async with db.begin()` block.
-    
-    """
-    current_outstanding = calculate_outstanding_balance(invoice_total, previously_paid)
-    
-    validate_payment_does_not_exceed_outstanding(new_payment, current_outstanding)
-   
-    total_paid_after  = _round(previously_paid + new_payment)
-    outstanding_after = calculate_outstanding_balance(invoice_total, total_paid_after)
-
-    new_status: InvoiceStatus = "paid" if outstanding_after == ZERO else "partial"
-
-    return PaymentAllocationResult(
-        invoice_total     = invoice_total,
-        previously_paid   = previously_paid,
-        new_payment       = new_payment,
-        total_paid_after  = total_paid_after,
-        outstanding_after = outstanding_after,
-        new_status        = new_status,
-    )
 
 
 # INVOICE STATUS VALIDATION 
@@ -282,15 +336,8 @@ def validate_invoice_accepts_credit_note(
     Two independent guards, both must pass:
     1. The original must be a sales or purchase invoice, not itself a
        credit note or debit note.
-    2. The original must be submitted with an outstanding balance
-       ('sent' or 'partial' = PAYABLE_STATES). A credit note is absorbed
-       through allocate_payment, which needs outstanding > 0. A draft was
-       never issued, a void invoice must stay void, and a fully paid
-       invoice has nothing left to absorb the credit.
-
-    Called twice: at credit note creation (fail early, clear error) and
-    again inside _apply_credit_note_to_original under the invoice lock
-    (the original's state may have changed between creation and submission).
+    2. The original must be submitted (‘sent’, ‘partial’ or ‘paid’). 
+    A fully paid invoice is allowed: the credit then creates a refund due.
     """
     if original_invoice_type not in CREDITABLE_ORIGINAL_TYPES:
         raise ValueError(
@@ -298,61 +345,19 @@ def validate_invoice_accepts_credit_note(
             f"cannot be credited. Credit notes can only be issued against sales "
             f"or purchase invoices."
         )
-    if original_invoice_status not in PAYABLE_STATES:
+    if original_invoice_status not in CREDITABLE_STATES:
         raise ValueError(
             f"Invoice '{original_invoice_number}' is in status '{original_invoice_status}' "
-            f"and cannot receive a credit note. Only submitted invoices with an "
-            f"outstanding balance ('sent' or 'partial') can be credited."
+            f"and cannot receive a credit note. Only submitted invoices "
+            f"('sent', 'partial' or 'paid') can be credited."
         )
     
-def calculate_post_credit_note_outstanding(
-    original_invoice_total: Decimal,
-    credit_note_amount: Decimal,
-    amount_paid: Decimal = ZERO,
-) -> Decimal:
-    """
-    Calculates the outstanding balance after applying a credit note.
-    Example:
-      Original invoice:   10,000
-      Credit note:        2,000  (partial return)
-      Adjusted invoice:   8,000
-      Previously paid:    3,000
-      Outstanding:        8,000 − 3,000 = 5,000
-
-    """
-    adjusted_invoice_total = _round(original_invoice_total - credit_note_amount)
-    if amount_paid > adjusted_invoice_total:
-        raise ValueError("amount paid should not be greater than actual pending invoice amount")
-    return _round(max(ZERO, adjusted_invoice_total - amount_paid))
-
-def derive_status_after_payment_cancellation(
-    remaining_paid: Decimal,
-    invoice_total: Decimal,
-) -> InvoiceStatus:
-    """
-    Determines the invoice's new status after a payment is cancelled and
-    paid_amount is recomputed.
-
-    remaining_paid is the sum of active payments PLUS submitted credit
-    notes, because a credit note reduces the balance through paid_amount
-    exactly as a payment does. That makes all three outcomes reachable:
-    - remaining_paid == 0               -> "sent"    (nothing absorbed)
-    - 0 < remaining_paid < invoice_total -> "partial"
-    - remaining_paid >= invoice_total    -> "paid"    (credits alone can
-      cover the full invoice, so cancelling a payment does not always
-      reopen the balance)
-
-    Pure function, no DB access.
-    """
-    if remaining_paid >= invoice_total:
-        return "paid"
-    return "sent" if remaining_paid == ZERO else "partial"
-
 
 def validate_invoice_is_voidable(
     invoice_status: InvoiceStatus,
     paid_amount: Decimal,
     invoice_number: str,
+    invoice_type: str
 ) -> None:
     """
     Raises ValueError if the invoice cannot be voided.
@@ -364,16 +369,16 @@ def validate_invoice_is_voidable(
     2. paid_amount must be exactly zero — this is the real invariant.
        VOIDABLE_STATES alone would already exclude "partial"/"paid" by
        name, but checking paid_amount directly guards against the status
-       and the amount ever drifting apart (the same "don't trust a label,
-       check the number" principle applied throughout this file — e.g.
-       calculate_outstanding_balance's own defensive max(ZERO, ...) rather
-       than trusting callers validated first).
+       and the amount ever drifting apart 
 
     Voiding an invoice with real payments recorded against it would leave
     those payments orphaned with nothing valid to point to — the correct
     instrument for a submitted, paid invoice needing correction is a
     Credit Note, not a void.
     """
+    if invoice_type == "credit_note":
+        raise ValueError(f"Credit note '{invoice_number}' cannot be voided once sent")
+
     if invoice_status not in VOIDABLE_STATES:
         raise ValueError(
             f"Invoice '{invoice_number}' is in status '{invoice_status}' "

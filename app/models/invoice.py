@@ -123,6 +123,11 @@ class Invoice(BaseModel):
         CheckConstraint("cess_amount >= 0", name="check_invoice_cess_non_negative"),
         CheckConstraint("outstanding_amount >= 0", name="check_invoice_outstanding_non_negative"),
 
+        CheckConstraint("credited_amount >= 0 AND credited_amount <= total_amount",
+                name="check_invoice_credited_not_exceed_total"),
+                
+        CheckConstraint("refunded_amount >= 0 AND refunded_amount <= paid_amount",
+                name="check_invoice_refunded_valid"),
         # Invoice number is unique within a business
         # businesses to use the same numbering sequence(eg: two tenants having INV -001)
         UniqueConstraint(
@@ -258,14 +263,38 @@ class Invoice(BaseModel):
 
     total_amount: Mapped[Decimal] = mapped_column(Numeric(17, 2), nullable=False)
     
+    # cash received (active payments only)
     paid_amount: Mapped[Decimal] = mapped_column(
         Numeric(17,2), nullable=False, default=Decimal("0"),
         server_default=text("0")
     )
 
+    # sum of sent credit notes against this invoice
+    credited_amount: Mapped[Decimal] = mapped_column(
+        Numeric(17, 2), nullable=False, default=Decimal("0"), server_default=text("0")
+    )  
+
+    # sum of active refunds paid out
+    refunded_amount: Mapped[Decimal] = mapped_column(
+        Numeric(17, 2), nullable=False, default=Decimal("0"), server_default=text("0")
+    )  
+
     outstanding_amount: Mapped[Decimal] = mapped_column(
-        Numeric(17,2), 
-        Computed("total_amount - paid_amount", persisted = True)
+        Numeric(17, 2),
+        Computed(
+            "CASE WHEN invoice_type = 'credit_note' THEN 0 "
+            "ELSE GREATEST(total_amount - credited_amount - paid_amount + refunded_amount, 0) END",
+            persisted=True,
+        ),
+    )
+
+    refund_due_amount: Mapped[Decimal] = mapped_column(
+        Numeric(17, 2),
+        Computed(
+            "CASE WHEN invoice_type = 'credit_note' THEN 0 "
+            "ELSE GREATEST(paid_amount + credited_amount - refunded_amount - total_amount, 0) END",
+            persisted=True,
+        ),
     )
     
     # Status 

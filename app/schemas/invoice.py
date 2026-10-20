@@ -24,7 +24,7 @@ class LineItemCreate(BaseModel):
     hsn_sac_code: str | None = Field(
         default= None,
         pattern=r"^[0-9]{4,8}$",
-        description="HSN (goods, numeric, 2 - 8 digits) or SAC (services, 99XXXX, 6 digits)"
+        description="HSN (goods, numeric, 4 - 8 digits) or SAC (services, 99XXXX, 6 digits)"
     )
 
     quantity: Decimal = Field(
@@ -216,7 +216,10 @@ class InvoiceResponse(BaseModel):
     cess_amount: Decimal 
     total_amount: Decimal 
     paid_amount: Decimal 
+    credited_amount: Decimal 
+    refunded_amount: Decimal 
     outstanding_amount: Decimal 
+    refund_due_amount: Decimal
     invoice_status: InvoiceStatus
     notes: str | None 
     terms: str | None 
@@ -268,5 +271,6 @@ class InvoiceSummaryResponse(BaseModel):
     total_amount: Decimal
     paid_amount: Decimal
     outstanding_amount: Decimal
+    refund_due_amount: Decimal
     invoice_status: InvoiceStatus
     created_at: datetime

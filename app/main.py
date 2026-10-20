@@ -8,7 +8,8 @@ from app.config import settings
 from app.core.exceptions import GSTBillingException
 from app.routers import (
     auth as auth_router, invoices as invoice_router, 
-    payments as payment_router, parties as party_router, 
+    payments as payment_router, parties as party_router,
+    refunds as refund_router 
 )
 
 
@@ -84,6 +85,8 @@ app.include_router(invoice_router.router, prefix="/api/v1")
 app.include_router(payment_router.invoice_payments_router, prefix="/api/v1")
 app.include_router(payment_router.payments_router, prefix= "/api/v1")
 app.include_router(party_router.router, prefix="/api/v1")
+app.include_router(refund_router.router, prefix="/api/v1")
+app.include_router(refund_router.refunds_router, prefix="/api/v1")
 
 
 # HEALTH CHECK

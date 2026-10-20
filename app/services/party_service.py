@@ -2,6 +2,8 @@ from uuid import UUID
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.db_errors import get_constraint_name
 from app.core.pagination import Page, encode_cursor, decode_cursor
 from app.core.exceptions import (
     DuplicatePartyGSTINError, InvalidPartyTaxIdentityError, PartyNotFoundError,
@@ -47,7 +49,7 @@ def _resolve_tax_identity(
 
 def _raise_if_duplicate_gstin(exc: IntegrityError, gstin: str | None) -> None:
     """Map the GSTIN unique-index violation to a clean 409. Other errors pass through."""
-    constraint = getattr(getattr(exc.orig, "diag", None), "constraint_name", None)
+    constraint = get_constraint_name(exc)
     if constraint == _UNIQUE_GSTIN_CONSTRAINT:
         raise DuplicatePartyGSTINError(gstin or "") from exc
 

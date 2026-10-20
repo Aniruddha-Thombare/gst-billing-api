@@ -82,6 +82,7 @@ class InvoiceType(str, Enum):
     CREDIT_NOTE = "credit_note"
     DEBIT_NOTE = "debit_note"
     PAYMENT = "payment"
+    REFUND = "refund"
 
 # Belongs to Invoice Table 
 class SupplyType(str, Enum):
