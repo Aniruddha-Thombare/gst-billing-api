@@ -170,6 +170,23 @@ class Invoice(BaseModel):
             "invoice_type", 
             "financial_year"
         ),
+
+        # AR aging: open receivables only. Partial, so it stays small however
+        # many paid/draft/void invoices exist.
+        Index(
+            "idx_invoices_open_receivables",
+            "tenant_id", "party_id", "due_date",
+            postgresql_where=text(
+                "invoice_status IN ('sent', 'partial') AND invoice_type IN ('sales', 'debit_note')"
+            ),
+        ),
+
+        # Refund-due lookups (money owed to customers)
+        Index(
+            "idx_invoices_refund_due",
+            "tenant_id",
+            postgresql_where=text("refund_due_amount > 0"),
+        ),
         
     )
 
