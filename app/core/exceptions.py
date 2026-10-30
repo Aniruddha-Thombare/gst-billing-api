@@ -511,3 +511,46 @@ class RefundAlreadyCancelledError(GSTBillingException):
             "REFUND_ALREADY_CANCELLED",
             409,
         )
+
+
+# GST REPORT EXCEPTIONS (GSTR-1)
+
+class InvalidReturnPeriodError(GSTBillingException):
+    """Triggered when return_period is not a real month in YYYY-MM format (or predates GST)."""
+    def __init__(self, period: str) -> None:
+        super().__init__(
+            f"Return period '{period}' is invalid. Use YYYY-MM (for example '2026-09'); "
+            "the earliest period is '2017-07'.",
+            "INVALID_RETURN_PERIOD",
+            422,
+        )
+
+
+class FutureReturnPeriodError(GSTBillingException):
+    """Triggered when the requested month has not started yet. Returns look backwards."""
+    def __init__(self, period: str) -> None:
+        super().__init__(
+            f"Return period '{period}' has not started yet.",
+            "FUTURE_RETURN_PERIOD",
+            422,
+        )
+
+
+class GSTR1NotApplicableError(GSTBillingException):
+    """GSTR-1 is filed by regular taxpayers. Composition dealers file CMP-08 / GSTR-4."""
+    def __init__(self, registration_type: str) -> None:
+        super().__init__(
+            f"GSTR-1 applies to regular taxpayers; this business is registered as '{registration_type}'.",
+            "GSTR1_NOT_APPLICABLE",
+            409,
+        )
+
+
+class ReportTooLargeError(GSTBillingException):
+    """The period holds more rows than one response may carry. A statutory report is never truncated."""
+    def __init__(self, row_limit: int) -> None:
+        super().__init__(
+            f"This period has more than {row_limit:,} rows. Use the CSV export for large periods.",
+            "REPORT_TOO_LARGE",
+            422,
+        )
