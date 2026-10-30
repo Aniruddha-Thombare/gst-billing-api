@@ -1,3 +1,13 @@
+"""
+GSTR-1 repository — READ ONLY. The only layer that touches the database
+for this report.
+
+Contract:
+  * every query filters on tenant_id (including each joined table);
+  * nothing here inserts, updates, deletes, flushes or commits;
+  * no business rules: classification and signing live in domain/gstr1_rules.py.
+"""
+
 from __future__ import annotations
 
 from datetime import date
@@ -24,7 +34,7 @@ _SALES = InvoiceType.SALES.value
 _CREDIT_NOTE = InvoiceType.CREDIT_NOTE.value
 
 
-def _outward_scope(original: Any) -> Any:
+def outward_scope(original: Any) -> Any:
     """
     Outward documents only: sales invoices, plus credit/debit notes whose
     ORIGINAL invoice is a sales invoice. `original` is the aliased Invoice
@@ -114,7 +124,7 @@ async def fetch_outward_rate_rows(
             Invoice.invoice_date >= start_date,
             Invoice.invoice_date <= end_date,
             Invoice.invoice_status.in_(REPORTABLE_STATUSES),
-            _outward_scope(original),
+            outward_scope(original),
         )
         .group_by(
             Invoice.id,
@@ -194,7 +204,7 @@ async def fetch_hsn_rows(
             Invoice.invoice_date >= start_date,
             Invoice.invoice_date <= end_date,
             Invoice.invoice_status.in_(REPORTABLE_STATUSES),
-            _outward_scope(original),
+            outward_scope(original),
         )
         .group_by(
             func.coalesce(InvoiceItem.hsn_sac_code, literal_column("''")),
@@ -239,7 +249,7 @@ async def fetch_numbered_documents(
             Invoice.invoice_date >= start_date,
             Invoice.invoice_date <= end_date,
             Invoice.invoice_status.in_(REPORTABLE_STATUSES + CANCELLED_STATUSES),
-            _outward_scope(original),
+            outward_scope(original),
         )
         .order_by(Invoice.invoice_date, Invoice.invoice_number)
         .limit(row_limit + 1)
@@ -272,7 +282,7 @@ async def count_draft_documents(
             Invoice.invoice_date >= start_date,
             Invoice.invoice_date <= end_date,
             Invoice.invoice_status == InvoiceStatus.DRAFT.value,
-            _outward_scope(original),
+            outward_scope(original),
         )
     )
     result = await db.execute(stmt)

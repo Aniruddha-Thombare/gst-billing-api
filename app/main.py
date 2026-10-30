@@ -7,10 +7,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.core.exceptions import GSTBillingException
 from app.routers import (
-    auth as auth_router, invoices as invoice_router, 
-    payments as payment_router, parties as party_router,
-    refunds as refund_router, reports as report_router, 
-    gstr1 as gstr1_router
+    auth as auth_router, invoices as invoice_router, payments as payment_router, 
+    parties as party_router,refunds as refund_router, reports as report_router, 
+    gstr1 as gstr1_router, gstr3b as gstr3b_router, 
+    sales_summary as sales_summary_router
 )
 
 
@@ -90,6 +90,8 @@ app.include_router(refund_router.router, prefix="/api/v1")
 app.include_router(refund_router.refunds_router, prefix="/api/v1")
 app.include_router(report_router.router, prefix="/api/v1")
 app.include_router(gstr1_router.router, prefix="/api/v1")
+app.include_router(gstr3b_router.router, prefix="/api/v1")
+app.include_router(sales_summary_router.router, prefix="/api/v1")
 
 # HEALTH CHECK
 @app.get("/health", tags=["System"])

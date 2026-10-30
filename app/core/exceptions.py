@@ -554,3 +554,10 @@ class ReportTooLargeError(GSTBillingException):
             "REPORT_TOO_LARGE",
             422,
         )
+
+
+# APPEND to the bottom of app/core/exceptions.py
+class InvalidReportRangeError(GSTBillingException):
+    """The requested date range is reversed, in the future, or would produce too many buckets."""
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason, "INVALID_REPORT_RANGE", 422)

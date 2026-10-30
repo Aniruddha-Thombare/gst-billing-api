@@ -1,20 +1,20 @@
+"""
+GSTR-1 service — validates the request, runs the read-only queries in ONE
+consistent snapshot, classifies rows with the pure domain rules and
+assembles the response. Contains no SQL and performs no writes.
+"""
+
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Sequence
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import (
-    FutureReturnPeriodError,
-    GSTR1NotApplicableError,
-    InvalidReturnPeriodError,
-    ReportTooLargeError,
-    TokenInvalidError,
-)
+from app.core.exceptions import ReportTooLargeError
 from app.domain.gstr1_rules import (
     B2CL_THRESHOLD,
     ZERO,
@@ -23,10 +23,9 @@ from app.domain.gstr1_rules import (
     ReturnPeriod,
     build_document_series,
     classify_outward_line,
-    parse_return_period,
     sign_for,
 )
-from app.models.enum import InvoiceType, RegistrationType, SupplyType
+from app.models.enum import InvoiceType, SupplyType
 from app.repositories import gstr1_repository as repo
 from app.schemas.gstr1 import (
     B2CSRow,
@@ -40,17 +39,16 @@ from app.schemas.gstr1 import (
     TaxAmounts,
     TenantSummary,
 )
+from app.services.report_common import (  # noqa: F401  (MAX_* are re-exported for the router)
+    MAX_EXPORT_ROWS,
+    MAX_JSON_ROWS,
+    assert_regular_taxpayer,
+    period_warnings,
+    resolve_return_period,
+    today_ist,
+)
 
 logger = logging.getLogger(__name__)
-
-# India has no daylight saving, so a fixed +05:30 offset is exact and needs no tz database
-# (the zoneinfo module fails on Windows unless the tzdata package is installed).
-IST = timezone(timedelta(hours=5, minutes=30))
-
-# A statutory report must never be silently truncated. Beyond these row
-# counts the request is rejected with a clear message instead.
-MAX_JSON_ROWS = 20_000
-MAX_EXPORT_ROWS = 200_000
 
 _DOCUMENT_SECTIONS: tuple[OutwardSection, ...] = (
     OutwardSection.B2B,
@@ -64,28 +62,6 @@ _DOCUMENT_SECTIONS: tuple[OutwardSection, ...] = (
 
 
 # ── SMALL, SINGLE-PURPOSE HELPERS ────────────────────────────────────────────
-
-def _today_ist() -> date:
-    return datetime.now(IST).date()
-
-
-def _resolve_period(label: str) -> ReturnPeriod:
-    try:
-        period = parse_return_period(label)
-    except ValueError as exc:
-        raise InvalidReturnPeriodError(label) from exc
-    if period.start > _today_ist():
-        raise FutureReturnPeriodError(label)
-    return period
-
-
-def _assert_gstr1_filer(profile: Any) -> None:
-    if profile is None:
-        # A valid token pointing at a tenant that no longer exists.
-        raise TokenInvalidError()
-    if profile["registration_type"] != RegistrationType.REGULAR.value:
-        raise GSTR1NotApplicableError(str(profile["registration_type"]))
-
 
 def _dec(value: Any) -> Decimal:
     return Decimal(value) if value is not None else ZERO
@@ -278,16 +254,9 @@ def _build_hsn(rows: Sequence[Any]) -> list[HsnRow]:
 def _build_warnings(
     *, period: ReturnPeriod, draft_count: int, hsn_rows: list[HsnRow], is_period_open: bool
 ) -> list[str]:
-    warnings: list[str] = []
-    if is_period_open:
-        warnings.append(
-            f"Period {period.label} has not finished yet; figures will change until the month closes."
-        )
-    if draft_count:
-        warnings.append(
-            f"{draft_count} draft document(s) dated in this period are NOT included. "
-            "Send or cancel them before filing."
-        )
+    warnings = period_warnings(
+        period_label=period.label, is_period_open=is_period_open, draft_count=draft_count
+    )
     if any(row.hsn_sac_code is None for row in hsn_rows):
         warnings.append("Some line items have no HSN/SAC code; they appear with an empty code in the HSN summary.")
     return warnings
@@ -310,15 +279,15 @@ async def get_gstr1_report(
     same snapshot: an invoice sent while the report runs cannot appear in
     one section and be missing from another.
     """
-    period = _resolve_period(return_period)
-    is_period_open = _today_ist() <= period.end
+    period = resolve_return_period(return_period)
+    is_period_open = today_ist() <= period.end
 
     async with db.begin():
         await db.connection(
             execution_options={"isolation_level": "REPEATABLE READ", "postgresql_readonly": True}
         )
         profile = await repo.get_tenant_profile(db, tenant_id=tenant_id)
-        _assert_gstr1_filer(profile)
+        assert_regular_taxpayer(profile)
 
         rate_rows = await repo.fetch_outward_rate_rows(
             db, tenant_id=tenant_id, start_date=period.start, end_date=period.end, row_limit=row_limit
