@@ -16,6 +16,7 @@ from app.models.refresh_token import RefreshToken
 from app.models.tenant_compliance import TenantCompliance
 from app.models.idempotency_key import IdempotencyKey
 from app.models.refund import Refund
+from app.models.item import Item 
 
 
 __all__ = [
@@ -32,6 +33,7 @@ __all__ = [
     "TenantCompliance",
     "IdempotencyKey",
     "Refund",
+    "Item",
 
     # enums
     "RegistrationType",

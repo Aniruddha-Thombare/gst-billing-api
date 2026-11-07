@@ -5,7 +5,7 @@ from uuid import UUID
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-
+from app.models.enum import AuditAction, EntityType
 from app.core.db_errors import get_constraint_name
 from app.core.exceptions import (
     InvoiceNotFoundError, RefundExceedsDueError, RefundReferenceAlreadyUsedError,
@@ -14,7 +14,7 @@ from app.core.exceptions import (
 from app.domain import ledger_rules
 from app.repositories import invoice_repository, refund_repository, payment_repository
 from app.schemas.refund import RefundCreateRequest, RefundRecordedResponse, RefundResponse
-from app.services import idempotency_service, sequence_service
+from app.services import idempotency_service, sequence_service, audit_service
 
 _MAX_SEQUENCE_RETRIES = 1
 
@@ -101,6 +101,8 @@ async def _record_refund_body(
     if invoice is None:
         raise InvoiceNotFoundError(str(invoice_id))
 
+    status_before = invoice.invoice_status
+
     try:
         position = ledger_rules.apply_refund(
             invoice_total=invoice.total_amount, paid_amount=invoice.paid_amount,
@@ -127,6 +129,25 @@ async def _record_refund_body(
         credited_amount=position.credited_amount, refunded_amount=position.refunded_amount,
         status=position.status, updated_by=user_id,
     )
+
+    await audit_service.record(
+        db, tenant_id=tenant_id, user_id=user_id,
+        entity_type=EntityType.REFUND, entity_id=refund.id, action=AuditAction.CREATE,
+        new_values={
+            "refund_number": refund_number,
+            "invoice_id": invoice_id,
+            "invoice_number": invoice.invoice_number,
+            "amount": request.amount,
+            "refund_mode": request.refund_mode,
+            "reference_number": request.reference_number,
+            "refund_date": request.refund_date,
+            "invoice_status_before": status_before,
+            "invoice_status_after": position.status,
+            "refunded_amount_after": position.refunded_amount,
+            "refund_due_after": position.refund_due_amount,
+        },
+    )
+
     return RefundRecordedResponse(
         refund=RefundResponse.model_validate(refund), invoice_id=invoice_id,
         invoice_status=position.status, paid_amount=position.paid_amount,
@@ -201,4 +222,18 @@ async def cancel_refund(
             db, invoice_id=invoice.id, tenant_id=tenant_id, paid_amount=position.paid_amount,
             credited_amount=position.credited_amount, refunded_amount=position.refunded_amount,
             status=position.status, updated_by=cancelled_by,
+        )
+        
+        await audit_service.record(
+            db, tenant_id=tenant_id, user_id=cancelled_by,
+            entity_type=EntityType.REFUND, entity_id=refund_id, action=AuditAction.CANCEL,
+            old_values={
+                "status": "active", "amount": refund.amount,
+                "refund_number": refund.refund_number, "invoice_id": refund.invoice_id,
+            },
+            new_values={
+                "status": "cancelled", "cancellation_reason": cancellation_reason,
+                "invoice_status_after": position.status,
+                "refunded_amount_after": position.refunded_amount,
+            },
         )

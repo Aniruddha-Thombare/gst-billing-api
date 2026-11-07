@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     # HS256 = HMAC with SHA-256. Symmetric — same key signs and verifies.
     # Upgrade path to RS256 (asymmetric) exists if you add a public key later.
     JWT_ALGORITHM: str = Field(default="HS256")
+
+    # Logging / monitoring
+    LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(default="INFO")
+    SQL_ECHO: bool = Field(default=False)          # raw SQL in logs; dev debugging only
+    SENTRY_DSN: str | None = Field(default=None)   # empty/unset = error reporting off
     
     model_config = SettingsConfigDict(
         env_file=".env",     # Read from .env file in project root

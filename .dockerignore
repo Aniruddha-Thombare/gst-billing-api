@@ -1,0 +1,44 @@
+# Version Control 
+.git
+.gitignore
+
+# Python Virtual Environments 
+.venv/
+venv/
+env/ 
+
+# Python Cache & Compiled files 
+__pycache__/
+*.py[cod]
+*.pyc
+*$py.class
+*.egg-info/
+
+# Testing and Code Coverage 
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE and Editor Configuration 
+.vscode/
+.idea/
+
+# Environment Variables and Secrets 
+.env
+.env.*
+!.env.example
+
+# Backups and Database Dumps 
+backups/
+*.dump
+*.sql
+
+# Archives and Local Data Files 
+*.csv
+*.zip
+
+# Build Artifacts 
+dist/
+build/
+
+docs/

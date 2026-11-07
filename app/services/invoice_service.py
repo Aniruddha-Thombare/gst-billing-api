@@ -21,10 +21,11 @@ from app.core.pagination import Page, encode_cursor, decode_date_cursor
 from app.domain import business_rules, tax_engine, ledger_rules
 from app.schemas.invoice import InvoiceCreateRequest, InvoiceResponse, InvoiceSummaryResponse
 from app.models.invoice import Invoice
+from app.models.enum import AuditAction, EntityType
 from app.services import idempotency_service
 from app.models.invoice_item import InvoiceItem
 from app.schemas.invoice import LineItemCreate
-from app.services import sequence_service
+from app.services import sequence_service, audit_service
 from app.repositories import ( 
     tenant_repository, party_repository, invoice_repository,
     tenant_compliance_repository ) 
@@ -302,6 +303,20 @@ async def _create_invoice_body(
         line_item_models=line_item_models,
     )
 
+    await audit_service.record(
+        db, tenant_id=tenant_id, user_id=user_id,
+        entity_type=EntityType.INVOICE, entity_id=invoice.id, action=AuditAction.CREATE,
+        new_values={
+            "invoice_number": invoice.invoice_number,
+            "invoice_type": request.invoice_type,
+            "invoice_status": "draft",
+            "party_id": request.party_id,
+            "invoice_date": request.invoice_date,
+            "total_amount": tax_summary.payable_amount,
+            "original_invoice_id": request.original_invoice_id,
+        },
+    )
+
     full_invoice = await invoice_repository.get_by_id_with_line_items(
         db, invoice_id=invoice.id, tenant_id=tenant_id,
     )
@@ -539,6 +554,8 @@ async def send_invoice(
         if not business_rules.validate_invoice_number_format(invoice.invoice_number):
             raise InvalidInvoiceNumberError(invoice.invoice_number)
 
+        status_before = invoice.invoice_status
+
         if invoice.invoice_type == "credit_note":
             await _apply_credit_note_to_original(
                 db,
@@ -550,6 +567,18 @@ async def send_invoice(
 
         await invoice_repository.update_submission_state(
             db, invoice_id=invoice_id, tenant_id=tenant_id, updated_by=user_id,
+        )
+        await audit_service.record(
+            db, tenant_id=tenant_id, user_id=user_id,
+            entity_type=EntityType.INVOICE, entity_id=invoice_id, action=AuditAction.SEND,
+            old_values={"invoice_status": status_before},
+            new_values={
+                "invoice_status": "sent",
+                "invoice_number": invoice.invoice_number,
+                "invoice_type": invoice.invoice_type,
+                "total_amount": invoice.total_amount,
+                "original_invoice_id": invoice.original_invoice_id,
+            },
         )
 
         full_invoice = await invoice_repository.get_by_id_with_line_items(
@@ -613,6 +642,12 @@ async def _apply_credit_note_to_original(
     except ValueError as exc:
         raise InvoiceNotCreditableError(str(exc)) from exc
 
+    before = {
+        "credited_amount": original.credited_amount,
+        "invoice_status": original.invoice_status,
+        "refund_due_amount": original.refund_due_amount,
+    }
+        
     try:
         position = ledger_rules.apply_credit_note(
             invoice_total=original.total_amount, paid_amount=original.paid_amount,
@@ -626,6 +661,19 @@ async def _apply_credit_note_to_original(
         db, invoice_id=original_invoice_id, tenant_id=tenant_id,
         paid_amount=position.paid_amount, credited_amount=position.credited_amount,
         refunded_amount=position.refunded_amount, status=position.status, updated_by=user_id,
+    )
+
+    await audit_service.record(
+        db, tenant_id=tenant_id, user_id=user_id,
+        entity_type=EntityType.INVOICE, entity_id=original_invoice_id, action=AuditAction.UPDATE,
+        old_values=before,
+        new_values={
+            "credited_amount": position.credited_amount,
+            "invoice_status": position.status,
+            "refund_due_amount": position.refund_due_amount,
+            "reason": "credit_note_applied",
+            "credit_note_total": credit_note_total,
+        },
     )
 
 
@@ -654,6 +702,8 @@ async def void_invoice(
         if invoice is None:
             raise InvoiceNotFoundError(str(invoice_id))
 
+        status_before = invoice.invoice_status
+
         try:
             ledger_rules.validate_invoice_is_voidable(
                 invoice.invoice_status, invoice.paid_amount, invoice.invoice_number,
@@ -669,6 +719,13 @@ async def void_invoice(
         await invoice_repository.update_void_state(
             db, invoice_id=invoice_id, tenant_id=tenant_id,
             voided_by=voided_by, void_reason=void_reason,
+        )
+        await audit_service.record(
+            db, tenant_id=tenant_id, user_id=voided_by,
+            entity_type=EntityType.INVOICE, entity_id=invoice_id, action=AuditAction.VOID,
+            old_values={"invoice_status": status_before},
+            new_values={"invoice_status": "void", "void_reason": void_reason,
+                        "invoice_number": invoice.invoice_number},
         )
 
     return await get_invoice(db, invoice_id=invoice_id, tenant_id=tenant_id)

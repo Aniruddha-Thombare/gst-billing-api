@@ -163,6 +163,8 @@ class EntityType(str, Enum):
     ITEM = "invoice_item"
     SEQUENCE = "sequence"
     PAYMENT = "payment"
+    REFUND = "refund"
+    CATALOG_ITEM = "catalog_item"
 
 # Belongs to Audit_log Table 
 class AuditAction(str, Enum):
@@ -180,4 +182,11 @@ class AuditAction(str, Enum):
     DELETE = "delete"
     LOGIN = "login"
     EXPORT = "export"
+    SEND = "send"
+    VOID = "void"
+    CANCEL = "cancel"
+    LOGOUT = "logout"
+    LOGIN_FAILED = "login_failed"
+    ACTIVATE = "activate"
+    DEACTIVATE = "deactivate"
 

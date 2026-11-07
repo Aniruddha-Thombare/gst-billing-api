@@ -59,6 +59,7 @@ class DuplicateGSTINError(GSTBillingException):
     def __init__(self, gstin: str) -> None:
         super().__init__(f"GSTIN '{gstin}' is already registered.", "DUPLICATE_GSTIN", 409)
 
+
 class DuplicatePANError(GSTBillingException):
     """
     A tenant with this PAN already exists (uq_tenant_pan). The platform
@@ -372,7 +373,7 @@ class CreditNotePartyMismatchError(GSTBillingException):
 
 
 class PossibleDuplicateInvoiceError(GSTBillingException):
-    def __init__(self, party_id: str, amount: Decimal, existing_invoice_number: str, elapsed_display: str) -> None:
+    def __init__(self, amount: Decimal, existing_invoice_number: str, elapsed_display: str) -> None:
         super().__init__(
             f"An invoice of ₹{amount} for this party was already created "
             f"{elapsed_display} ago (invoice '{existing_invoice_number}'). "
@@ -561,3 +562,64 @@ class InvalidReportRangeError(GSTBillingException):
     """The requested date range is reversed, in the future, or would produce too many buckets."""
     def __init__(self, reason: str) -> None:
         super().__init__(reason, "INVALID_REPORT_RANGE", 422)
+
+
+# Items Master
+
+class ItemNotFoundError(GSTBillingException):
+    """
+    Item does not exist OR belongs to a different tenant. 404 for both,
+    deliberately, to avoid leaking another tenant's item ids.
+    """
+
+    def __init__(self, item_id: str) -> None:
+        super().__init__(f"Item '{item_id}' not found.", "ITEM_NOT_FOUND", 404)
+
+
+class DuplicateItemNameError(GSTBillingException):
+    """An active or inactive item with this name already exists for the tenant."""
+    def __init__(self, name: str) -> None:
+        super().__init__(
+            f"An item named '{name}' already exists.", "DUPLICATE_ITEM_NAME", 409
+        )
+
+
+class InvalidItemError(GSTBillingException):
+    """Item payload is internally inconsistent (e.g. bad HSN/SAC or GST rate)."""
+    def __init__(self, message: str) -> None:
+        super().__init__(message, "INVALID_ITEM", 422)
+
+
+# User management and login lockout
+
+class UserNotFoundError(GSTBillingException):
+    """
+    User does not exist OR belongs to a different tenant. 404 for both,
+    deliberately, to avoid leaking another tenant's user ids.
+    """
+    def __init__(self, user_id: str) -> None:
+        super().__init__(f"User '{user_id}' not found.", "USER_NOT_FOUND", 404)
+
+
+class UserManagementNotAllowedError(GSTBillingException):
+    """Caller's role or the target's state forbids this user-management action."""
+    def __init__(self, message: str) -> None:
+        super().__init__(message, "USER_MANAGEMENT_NOT_ALLOWED", 403)
+
+
+class CurrentPasswordIncorrectError(GSTBillingException):
+    """Current password supplied for a password change did not match."""
+    def __init__(self) -> None:
+        super().__init__(
+            "Current password is incorrect.", "CURRENT_PASSWORD_INCORRECT", 400
+        )
+
+
+class AccountLockedError(GSTBillingException):
+    """Too many failed logins inside the lockout window."""
+    def __init__(self, window_minutes: int) -> None:
+        super().__init__(
+            f"Too many failed login attempts. Try again in {window_minutes} minutes.",
+            "ACCOUNT_LOCKED",
+            429,
+        )

@@ -1,6 +1,6 @@
 import asyncio
 
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,19 +10,23 @@ from app.schemas.auth import (
     TenantRegisterRequest, LoginRequest, RefreshRequest, TokenResponse,
     RegistrationResponse, AccessTokenResponse)
 from app.core import security
-from app.models.enum import UserRole
+from app.models.enum import UserRole, AuditAction, EntityType
 from app.domain.business_rules import get_financial_year
+from app.domain import login_lockout_rules
 from app.core.db_errors import get_constraint_name
 from app.core.security import TokenDecodeError
 from app.repositories import (
     tenant_repository, user_repository,
-    refresh_token_repository, tenant_compliance_repository
+    refresh_token_repository, tenant_compliance_repository,
+    audit_repository, user_admin_repository
 )
 from app.core.exceptions import (
     AuthenticationError, DuplicateGSTINError, DuplicatePANError, 
     DuplicateEmailError, StateCodeMismatchError, UserInactiveError,
-    RefreshTokenRevokedError, TokenInvalidError, TokenExpiredError
+    RefreshTokenRevokedError, TokenInvalidError, TokenExpiredError,
+    AccountLockedError
 )
+from app.services import audit_service
 
 # A real bcrypt hash, built once at startup. Used when the email does not
 # exist, so unknown-email and wrong-password logins take the same time.
@@ -102,6 +106,21 @@ async def register(
                 effective_to=None
             )
 
+            await audit_service.record(
+                db, tenant_id=tenant.id, user_id=user.id,
+                entity_type=EntityType.TENANT, entity_id=tenant.id, action=AuditAction.CREATE,
+                new_values={
+                    "business_name": request.business_name, "gstin": request.gstin.upper(),
+                    "state_code": request.state_code,
+                    "registration_type": request.registration_type,
+                },
+            )
+            await audit_service.record(
+                db, tenant_id=tenant.id, user_id=user.id,
+                entity_type=EntityType.USER, entity_id=user.id, action=AuditAction.CREATE,
+                new_values={"email": user.email, "role": UserRole.OWNER, "full_name": request.full_name.strip()},
+            )
+
     except IntegrityError as exc:
         # Backstop for two identical registrations racing past the checks above.
         constraint = get_constraint_name(exc)
@@ -118,6 +137,15 @@ async def register(
         tenant_id=tenant.id,
         email=user.email
     )
+
+async def _record_login_failure(db: AsyncSession, *, user, reason: str) -> None:
+    """Own short transaction: committed before the auth error is raised."""
+    async with db.begin():
+        await audit_service.record(
+            db, tenant_id=user.tenant_id, user_id=None,
+            entity_type=EntityType.USER, entity_id=user.id,
+            action=AuditAction.LOGIN_FAILED, new_values={"reason": reason},
+        )
 
 
 async def login(
@@ -136,6 +164,18 @@ async def login(
     """
     async with db.begin():
         user = await user_repository.get_by_email(db, email=request.email)
+        recent_failures = 0
+        if user is not None:
+            recent_failures = await audit_repository.count_failed_logins_since_last_success(
+                db, tenant_id=user.tenant_id, user_id=user.id,
+                window_start=datetime.now(timezone.utc)
+                - timedelta(minutes=login_lockout_rules.WINDOW_MINUTES),
+            )
+
+    # Checked before the password so a locked account stays locked even for the
+    # right password, and no further failure rows are written while locked.
+    if login_lockout_rules.is_locked(recent_failures):
+        raise AccountLockedError(login_lockout_rules.WINDOW_MINUTES)
 
     # Same error for "no such user" and "wrong password", and the same
     # amount of work for both (dummy hash), so response time leaks nothing.
@@ -145,9 +185,12 @@ async def login(
     )
 
     if not user or not password_is_correct:
+        if user is not None:
+            await _record_login_failure(db, user=user, reason="wrong_password")
         raise AuthenticationError()
 
     if not user.is_active:
+        await _record_login_failure(db, user=user, reason="user_inactive")
         raise UserInactiveError()
 
     access_token = security.create_access_token(
@@ -174,6 +217,11 @@ async def login(
             user_id=user.id,
             tenant_id=user.tenant_id
         )
+        await audit_service.record(
+            db, tenant_id=user.tenant_id, user_id=user.id,
+            entity_type=EntityType.USER, entity_id=user.id, action=AuditAction.LOGIN,
+            new_values={"device_info": device_info},
+        )
 
     return TokenResponse(
         access_token=access_token,
@@ -187,13 +235,14 @@ async def refresh(
     request: RefreshRequest,
 ) -> AccessTokenResponse:
     """
-    Issues a new access token from a valid refresh token. A valid JWT alone
-    is not enough: the token's hash must exist in the DB and not be revoked.
+    Issues a new access token from a valid refresh token. The token's hash must
+    exist in the DB and not be revoked, and the user must still be active. The
+    new access token carries the user's CURRENT role from the database.
     """
     try:
         payload = security.decode_token(
             request.refresh_token,
-            expected_type="refresh",    # rejects access tokens here
+            expected_type="refresh",
         )
     except (TokenDecodeError, TokenExpiredError):
         raise TokenInvalidError()
@@ -204,6 +253,9 @@ async def refresh(
             raw_token=request.refresh_token,
             tenant_id=payload.tenant_id
         )
+        user = await user_admin_repository.get_by_id(
+            db, tenant_id=payload.tenant_id, user_id=UUID(str(payload.sub)),
+        )
 
     if not stored_token:
         raise TokenInvalidError()
@@ -211,11 +263,13 @@ async def refresh(
     if not stored_token.is_valid:
         raise RefreshTokenRevokedError()
 
-    # No refresh-token rotation yet; the same refresh token lives its 7 days.
+    if user is None or not user.is_active:
+        raise UserInactiveError()
+
     access_token = security.create_access_token(
-        user_id=payload.sub,
-        tenant_id=payload.tenant_id,
-        role=payload.role,
+        user_id=user.id,
+        tenant_id=user.tenant_id,
+        role=user.role,
     )
 
     return AccessTokenResponse(access_token=access_token)
@@ -235,4 +289,8 @@ async def logout(
     async with db.begin():
         await refresh_token_repository.revoke(
             db, raw_token=refresh_token, tenant_id=tenant_id, user_id=user_id,
+        )
+        await audit_service.record(
+            db, tenant_id=tenant_id, user_id=user_id,
+            entity_type=EntityType.USER, entity_id=user_id, action=AuditAction.LOGOUT,
         )

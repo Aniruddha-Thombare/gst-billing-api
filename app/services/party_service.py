@@ -12,6 +12,8 @@ from app.domain import business_rules
 from app.models.party import Party
 from app.repositories import party_repository
 from app.schemas.party import PartyCreateRequest, PartyUpdateRequest, PartyResponse
+from app.models.enum import AuditAction, EntityType
+from app.services import audit_service
 
 _UNIQUE_GSTIN_CONSTRAINT = "uq_party_tenant_gstin"
 
@@ -87,18 +89,14 @@ async def create_party(
                 db, tenant_id=tenant_id, created_by=user_id,
                 party_type=request.party_type, **values,
             )
+            await audit_service.record(
+                db, tenant_id=tenant_id, user_id=user_id,
+                entity_type=EntityType.PARTY, entity_id=party.id, action=AuditAction.CREATE,
+                new_values={"party_type": request.party_type, **values},
+            )
     except IntegrityError as exc:
         _raise_if_duplicate_gstin(exc, gstin)
         raise
-    return party
-
-
-async def get_party(db: AsyncSession, *, party_id: UUID, tenant_id: UUID) -> Party:
-    """Fetch one party. Missing or other-tenant -> 404."""
-    async with db.begin():
-        party = await party_repository.get_by_id(db, party_id=party_id, tenant_id=tenant_id)
-    if party is None:
-        raise PartyNotFoundError(str(party_id))
     return party
 
 
@@ -108,6 +106,7 @@ async def update_party(
     """
     Full replace of editable fields. Already-issued invoices are unaffected:
     they hold a frozen snapshot of the party's GSTIN and state.
+    Only the fields that actually changed are written to the audit trail.
     """
     gstin, pan = _resolve_tax_identity(
         gstin=request.gstin, pan=request.pan, state_code=request.state_code,
@@ -116,12 +115,29 @@ async def update_party(
 
     try:
         async with db.begin():
+            before = await party_repository.get_by_id(db, party_id=party_id, tenant_id=tenant_id)
+            if before is None:
+                raise PartyNotFoundError(str(party_id))
+            old_snapshot = {key: getattr(before, key) for key in values}
+            # Detach so the re-read below returns the freshly updated row,
+            # not this stale identity-mapped object.
+            db.expunge(before)
+
             rows = await party_repository.update_fields(
                 db, party_id=party_id, tenant_id=tenant_id, updated_by=user_id, values=values,
             )
             if rows == 0:
                 raise PartyNotFoundError(str(party_id))
             party = await party_repository.get_by_id(db, party_id=party_id, tenant_id=tenant_id)
+
+            changed = [key for key in values if old_snapshot[key] != values[key]]
+            if changed:
+                await audit_service.record(
+                    db, tenant_id=tenant_id, user_id=user_id,
+                    entity_type=EntityType.PARTY, entity_id=party_id, action=AuditAction.UPDATE,
+                    old_values={key: old_snapshot[key] for key in changed},
+                    new_values={key: values[key] for key in changed},
+                )
     except IntegrityError as exc:
         _raise_if_duplicate_gstin(exc, gstin)
         raise
@@ -134,15 +150,38 @@ async def set_party_active(
     """
     Deactivate or reactivate. A deactivated party cannot be used on NEW
     invoices (invoice_service checks is_active); payments against its
-    existing invoices still work. Repeating the call is a no-op success.
+    existing invoices still work. Repeating the call is a no-op success
+    and writes no audit row, because nothing changed.
     """
     async with db.begin():
+        before = await party_repository.get_by_id(db, party_id=party_id, tenant_id=tenant_id)
+        if before is None:
+            raise PartyNotFoundError(str(party_id))
+        was_active = before.is_active
+        db.expunge(before)
+
         rows = await party_repository.set_active(
             db, party_id=party_id, tenant_id=tenant_id, is_active=is_active, updated_by=user_id,
         )
         if rows == 0:
             raise PartyNotFoundError(str(party_id))
         party = await party_repository.get_by_id(db, party_id=party_id, tenant_id=tenant_id)
+
+        if was_active != is_active:
+            await audit_service.record(
+                db, tenant_id=tenant_id, user_id=user_id,
+                entity_type=EntityType.PARTY, entity_id=party_id,
+                action=AuditAction.ACTIVATE if is_active else AuditAction.DEACTIVATE,
+                old_values={"is_active": was_active}, new_values={"is_active": is_active},
+            )
+    return party
+
+async def get_party(db: AsyncSession, *, party_id: UUID, tenant_id: UUID) -> Party:
+    """Fetch one party. Missing or other-tenant -> 404."""
+    async with db.begin():
+        party = await party_repository.get_by_id(db, party_id=party_id, tenant_id=tenant_id)
+    if party is None:
+        raise PartyNotFoundError(str(party_id))
     return party
 
 

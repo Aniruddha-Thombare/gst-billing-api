@@ -11,7 +11,7 @@ engine = create_async_engine(
     settings.DATABASE_URL,
 
     # prints every SQL query directly to the terminal if we are in development mode
-    echo = settings.ENVIRONMENT == "development",
+        echo = settings.SQL_ECHO,
     
     # Verify whether the connection is alive before handing it to the application
     pool_pre_ping = True,

@@ -6,6 +6,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from app.core.security import decode_token, TokenDecodeError
 from app.core.exceptions import PermissionDeniedError, TokenExpiredError
+from app.core.logging_config import tenant_id_var, user_id_var
 from app.schemas.auth import TokenPayload
 from app.models.enum import UserRole
 
@@ -84,6 +85,11 @@ async def get_current_user(
             detail={"message": str(exc), "code": "TOKEN_INVALID"},
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+    # Every log line for the rest of this request now carries who made it.
+    tenant_id_var.set(str(payload.tenant_id))
+    user_id_var.set(str(payload.sub))
+    return payload
 
     return payload
     # The payload (TokenPayload) is now available in every endpoint

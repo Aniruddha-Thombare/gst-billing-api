@@ -58,18 +58,6 @@ class AuditLog(Base):
         # Used for monitoring individual staff activity and "Employee productivity logs"
         Index("idx_audit_logs_user_created", "user_id", "created_at"), 
 
-        # GIN - Generalized Inverted Index, it works on content insided a JSON column
-        # This is for Postgresql Level, it lets look inside the JSON and query specific fields
-        Index(
-            "idx_audit_logs_new_values_gin",
-            "new_values",
-            postgresql_using="gin"
-        ),
-        Index(
-            "idx_audit_logs_old_values_gin",
-            "old_values",
-            postgresql_using="gin"
-        ),
     )
 
     # PRIMARY KEY — BIGSERIAL

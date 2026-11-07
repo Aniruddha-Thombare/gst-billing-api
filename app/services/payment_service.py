@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services import idempotency_service
 from app.repositories import invoice_repository, payment_repository, refund_repository
-from app.services import sequence_service
+from app.services import sequence_service, audit_service
 from app.domain import ledger_rules
 from app.schemas.payment import (
     REFERENCE_REQUIRED_MODES, PaymentCreateRequest, PaymentResponse, 
@@ -25,6 +25,7 @@ from app.core.exceptions import (
     PossibleDuplicatePaymentError, PaymentNotFoundError, PaymentAlreadyCancelledError,
     InvalidListQueryError, PaymentCancelBlockedByRefundError
 )
+from app.models.enum import AuditAction, EntityType
 
 _MAX_SEQUENCE_RETRIES = 1
 
@@ -194,6 +195,7 @@ async def _record_payment_body(
                 elapsed_display=_format_elapsed(minutes_ago),
             )
 
+    status_before = invoice.invoice_status
     position = ledger_rules.apply_payment(
         invoice_total=invoice.total_amount, paid_amount=invoice.paid_amount,
         credited_amount=invoice.credited_amount, refunded_amount=invoice.refunded_amount,
@@ -212,6 +214,23 @@ async def _record_payment_body(
         db, invoice_id=invoice_id, tenant_id=tenant_id, paid_amount=position.paid_amount,
         credited_amount=position.credited_amount, refunded_amount=position.refunded_amount,
         status=position.status, updated_by=user_id,
+    )
+    await audit_service.record(
+        db, tenant_id=tenant_id, user_id=user_id,
+        entity_type=EntityType.PAYMENT, entity_id=payment.id, action=AuditAction.CREATE,
+        new_values={
+            "payment_number": payment_number,
+            "invoice_id": invoice_id,
+            "invoice_number": invoice.invoice_number,
+            "amount": request.amount,
+            "payment_mode": request.payment_mode,
+            "reference_number": request.reference_number,
+            "payment_date": request.payment_date,
+            "invoice_status_before": status_before,
+            "invoice_status_after": position.status,
+            "paid_amount_after": position.paid_amount,
+            "outstanding_after": position.outstanding_amount,
+        },
     )
     return PaymentRecordedResponse(
         payment=PaymentResponse.model_validate(payment), invoice_id=invoice_id,
@@ -294,6 +313,20 @@ async def cancel_payment(
             db, invoice_id=invoice.id, tenant_id=tenant_id, paid_amount=position.paid_amount,
             credited_amount=position.credited_amount, refunded_amount=position.refunded_amount,
             status=position.status, updated_by=cancelled_by,
+        )
+
+        await audit_service.record(
+            db, tenant_id=tenant_id, user_id=cancelled_by,
+            entity_type=EntityType.PAYMENT, entity_id=payment_id, action=AuditAction.CANCEL,
+            old_values={
+                "status": "active", "amount": payment.amount,
+                "payment_number": payment.payment_number, "invoice_id": payment.invoice_id,
+            },
+            new_values={
+                "status": "cancelled", "cancellation_reason": cancellation_reason,
+                "invoice_status_after": position.status,
+                "paid_amount_after": position.paid_amount,
+            },
         )
 
     _enqueue_payment_cancelled_tasks(payment_id=str(payment_id), tenant_id=str(tenant_id))

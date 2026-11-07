@@ -1,28 +1,37 @@
-# Virtual Environment
+# Virtual environment
 venv/
+.venv/
 
-# Python Cache
-__pycache__/ 
+# Python cache
+__pycache__/
 *.pyc
 
-# Enivronment Variables 
+# Secrets: ignore every .env file EXCEPT the template
+env/
 .env
-.env.example
+.env.*
+!.env.example
 
-# Packaging 
+# Packaging
 *.egg-info/
 
-# sql files 
+# SQL files and database dumps (may contain real customer data)
 *.sql
+*.dump
+backups/
 
-# testing/ coverage
+# Exports and bundles
+*.csv
+*.zip
+
+# Testing / coverage
 .pytest_cache/
 .coverage
 
-# Build 
+# Build
 dist/
 build/
 
-# Editor 
+# Editor
 .vscode/
 .idea/

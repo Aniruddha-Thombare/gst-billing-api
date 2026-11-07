@@ -1,16 +1,39 @@
+# DEVELOPMENT stack (hot reload). Start: docker compose up -d --build
+# Secrets come from .env (never committed). Names and ports kept from your original file.
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+# Settings shared by the migrate and api containers.
+# INSIDE Docker, "localhost" is the container itself, so the database host is the
+# service name "postgres" and the Redis host is "redis". These values override
+# whatever DATABASE_URL / REDIS_URL say in .env (those are for running uvicorn on your laptop).
+
+x-app-env: &app-env
+  ENVIRONMENT: ${ENVIRONMENT:-development}
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+  REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+  JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+  ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-15}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  SQL_ECHO: ${SQL_ECHO:-false}
+  SENTRY_DSN: ${SENTRY_DSN:-}
 
 services:
- # 1. The Database Service
+  # 1. The Database Service
   postgres:
     image: postgres:16
     container_name: gst_postgres
     restart: unless-stopped
     environment:
-        POSTGRES_USER: ${POSTGRES_USER}
-        POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-        POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"      # pgAdmin -> localhost:5433, invisible to your network
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -19,6 +42,7 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+    logging: *default-logging
 
   # 2. The Redis Service
   redis:
@@ -38,20 +62,41 @@ services:
       --appendfsync everysec
       --auto-aof-rewrite-percentage 100
       --auto-aof-rewrite-min-size 64mb
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli","-a", "${REDIS_PASSWORD}", "ping"]
+      # REDISCLI_AUTH avoids the "password on command line" warning; grep PONG fails the check on any error
+      test: ["CMD-SHELL", "REDISCLI_AUTH=$$REDIS_PASSWORD redis-cli ping | grep -q PONG"]
       interval: 10s
       timeout: 3s
       retries: 3
       start_period: 5s
+    logging: *default-logging
 
-  # 3. The API Service
-  api:  
-    build: 
+  # 3. One-shot job: apply database migrations, then exit.
+  # Doing it here (not inside the API start-up) means two API workers never race to migrate.
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gst_migrate
+    command: ["alembic", "upgrade", "head"]
+    environment: *app-env
+    volumes:
+      - ./migrations:/app/migrations   # new migration files are visible without a rebuild
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    logging: *default-logging
+
+  # 4. The API Service
+  api:
+    build:
       context: .
       dockerfile: Dockerfile
     container_name: gst_api
@@ -61,14 +106,55 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     ports:
       - "8000:8000"
-    env_file:
-      - .env 
+    environment:
+      <<: *app-env
+      WATCHFILES_FORCE_POLLING: "true"   # makes --reload notice edits made on a Windows drive
     volumes:
       - ./app:/app/app
-    command: 
-      uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    logging: *default-logging
+
+  # 5. Daily compressed database dump -> ./backups (7 days kept)
+  backup:
+    image: postgres:16
+    container_name: gst_backup
+    restart: unless-stopped
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB}
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-7}
+    volumes:
+      - ./backups:/backups
+      - ./scripts/backup_loop.sh:/backup_loop.sh:ro
+    entrypoint: ["sh", "/backup_loop.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging: *default-logging
+
+  # 6 The Scheduler service
+  scheduler:
+    build: .
+    container_name: gst_scheduler
+    command: python -m app.scheduler.main
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *app-env
+      WATCHFILES_FORCE_POLLING: "true"
+    healthcheck:
+      disable: true   # the image's HEALTHCHECK probes the web server, which this container does not run
+    restart: unless-stopped
+    logging: *default-logging
 
 volumes:
   postgres_data:
