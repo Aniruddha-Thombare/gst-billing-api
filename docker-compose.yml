@@ -156,6 +156,50 @@ services:
     restart: unless-stopped
     logging: *default-logging
 
+  # TEST STACK (profile "test"): own database + own API on :8001.
+  # A plain "docker compose up" never starts these. See scripts/reset_test_db.sh.
+  migrate-test:
+    profiles: ["test"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gst_migrate_test
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      <<: *app-env
+      ENVIRONMENT: testing
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/gst_test
+    volumes:
+      - ./migrations:/app/migrations
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    logging: *default-logging
+
+  api-test:
+    profiles: ["test"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gst_api_test
+    environment:
+      <<: *app-env
+      ENVIRONMENT: testing
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/gst_test
+    ports:
+      - "127.0.0.1:8001:8000"
+    volumes:
+      - ./app:/app/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    restart: "no"
+    logging: *default-logging
+
 volumes:
   postgres_data:
   redis_data:
