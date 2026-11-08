@@ -623,3 +623,16 @@ class AccountLockedError(GSTBillingException):
             "ACCOUNT_LOCKED",
             429,
         )
+
+
+class InvoicePdfNotAvailableError(GSTBillingException):
+    """The invoice exists but may not be printed (draft, or a purchase invoice)."""
+    def __init__(self, message: str) -> None:
+        super().__init__(message, "INVOICE_PDF_NOT_AVAILABLE", 409)
+
+
+class DocumentNotFoundError(GSTBillingException):
+    """A document's source row does not exist OR belongs to another tenant: 404 for both."""
+
+    def __init__(self, kind: str, identifier: str) -> None:
+        super().__init__(f"{kind} '{identifier}' not found.", "DOCUMENT_NOT_FOUND", 404)

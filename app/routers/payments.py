@@ -1,7 +1,7 @@
 from datetime import date
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, Query, status
+from fastapi import APIRouter, Depends, Header, Query, status, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import require_role
@@ -15,7 +15,7 @@ from app.schemas.payment import (
     PaymentRecordedResponse,
     PaymentResponse,
 )
-from app.services import payment_service
+from app.services import payment_service, voucher_pdf_service
 
 
 # Routes that live under /invoices/{invoice_id}/...
@@ -138,4 +138,29 @@ async def cancel_payment(
         cancelled_by=current_user.sub,
         payment_id=payment_id,
         cancellation_reason=request.cancellation_reason,
+    )
+
+
+@payments_router.get(
+    "/{payment_id}/pdf",
+    summary="Download the payment receipt as a PDF",
+    response_class=Response,
+    responses={200: {"content": {"application/pdf": {}}}},
+)
+async def download_payment_receipt(
+    payment_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: TokenPayload = Depends(require_role(*_READ_ROLES)),
+) -> Response:
+    """Permission: any role. 404 if missing or another tenant's. Cancelled payments print watermarked."""
+    document = await voucher_pdf_service.generate_payment_receipt_pdf(
+        db, payment_id=payment_id, tenant_id=current_user.tenant_id
+    )
+    return Response(
+        content=document.content,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{document.filename}"',
+            "Cache-Control": "no-store",
+        },
     )

@@ -368,3 +368,13 @@ async def list_page(
     stmt = stmt.order_by(Invoice.invoice_date.desc(), Invoice.id.desc()).limit(limit)
     result = await db.execute(stmt)
     return [(row[0], row[1]) for row in result.all()]
+
+
+async def exists_for_tenant(
+    db: AsyncSession, *, invoice_id: UUID, tenant_id: UUID,
+) -> bool:
+    """Cheap existence check (no row lock, no line items). Always tenant-scoped."""
+    result = await db.execute(
+        select(Invoice.id).where(Invoice.id == invoice_id, Invoice.tenant_id == tenant_id)
+    )
+    return result.scalar_one_or_none() is not None

@@ -1,6 +1,6 @@
 from uuid import UUID
 from datetime import date 
-from fastapi import APIRouter, status, Depends, Header, Query
+from fastapi import APIRouter, status, Depends, Header, Query, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import require_role
@@ -11,7 +11,7 @@ from app.schemas.invoice import (
 )
 from app.models.enum import InvoiceStatus, InvoiceType, UserRole
 from app.database import get_db
-from app.services import invoice_service
+from app.services import invoice_service, invoice_pdf_service 
 
 
 router = APIRouter(
@@ -172,4 +172,29 @@ async def get_invoice(
     """Permission: any role. 404 if missing or belongs to another tenant."""
     return await invoice_service.fetch_invoice(
         db, invoice_id=invoice_id, tenant_id=current_user.tenant_id,
+    )
+
+
+@router.get(
+    "/{invoice_id}/pdf",
+    summary="Download the invoice as a PDF",
+    response_class=Response,
+    responses={200: {"content": {"application/pdf": {}}}},
+)
+async def download_invoice_pdf(
+    invoice_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: TokenPayload = Depends(require_role(*_READ_ROLES)),
+) -> Response:
+    """Permission: any role. 404 if missing or another tenant's; 409 for drafts and purchase invoices."""
+    document = await invoice_pdf_service.generate_invoice_pdf(
+        db, invoice_id=invoice_id, tenant_id=current_user.tenant_id
+    )
+    return Response(
+        content=document.content,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{document.filename}"',
+            "Cache-Control": "no-store",
+        },
     )

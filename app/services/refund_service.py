@@ -159,8 +159,10 @@ async def _record_refund_body(
 async def list_refunds(
     db: AsyncSession, *, invoice_id: UUID, tenant_id: UUID,
 ) -> list[RefundResponse]:
-    """All refunds of one invoice (a short list). Other tenants' invoices return an empty list."""
+    """All refunds of one invoice (a short list). 404 if the invoice is not this tenant's."""
     async with db.begin():
+        if not await invoice_repository.exists_for_tenant(db, invoice_id=invoice_id, tenant_id=tenant_id):
+            raise InvoiceNotFoundError(str(invoice_id))
         rows = await refund_repository.list_for_invoice(db, invoice_id=invoice_id, tenant_id=tenant_id)
     return [RefundResponse.model_validate(row) for row in rows]
 
@@ -237,3 +239,5 @@ async def cancel_refund(
                 "refunded_amount_after": position.refunded_amount,
             },
         )
+
+

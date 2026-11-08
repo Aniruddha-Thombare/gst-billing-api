@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, status
+from fastapi import APIRouter, Depends, Header, status, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import require_role
@@ -8,7 +8,7 @@ from app.database import get_db
 from app.models.enum import UserRole
 from app.schemas.auth import TokenPayload
 from app.schemas.refund import RefundCreateRequest, RefundRecordedResponse, RefundResponse, RefundCancelRequest
-from app.services import refund_service
+from app.services import refund_service, voucher_pdf_service
 
 router = APIRouter(prefix="/invoices", tags=["refunds"])
 
@@ -80,4 +80,29 @@ async def cancel_refund(
     await refund_service.cancel_refund(
         db, tenant_id=current_user.tenant_id, cancelled_by=current_user.sub,
         refund_id=refund_id, cancellation_reason=request.cancellation_reason,
+    )
+
+
+@refunds_router.get(
+    "/{refund_id}/pdf",
+    summary="Download the refund voucher as a PDF",
+    response_class=Response,
+    responses={200: {"content": {"application/pdf": {}}}},
+)
+async def download_refund_voucher(
+    refund_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: TokenPayload = Depends(require_role(*_READ_ROLES)),
+) -> Response:
+    """Permission: any role. 404 if missing or another tenant's. Cancelled refunds print watermarked."""
+    document = await voucher_pdf_service.generate_refund_voucher_pdf(
+        db, refund_id=refund_id, tenant_id=current_user.tenant_id
+    )
+    return Response(
+        content=document.content,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{document.filename}"',
+            "Cache-Control": "no-store",
+        },
     )

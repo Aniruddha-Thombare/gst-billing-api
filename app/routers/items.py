@@ -5,6 +5,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.enum import UserRole
 from app.core.dependencies import require_role
 from app.core.pagination import Page
 from app.database import get_db
@@ -15,7 +16,7 @@ from app.services import item_service
 router = APIRouter(prefix="/items", tags=["Items"])
 
 _WRITERS = require_role("owner", "accountant")
-_READERS = require_role("owner", "accountant", "viewer")
+_READERS = require_role(*(role.value for role in UserRole))
 
 
 @router.post("", response_model=ItemResponse, status_code=status.HTTP_201_CREATED)
